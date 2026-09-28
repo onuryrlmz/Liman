@@ -46,6 +46,10 @@ pub struct ConnectParams {
     pub shell: bool,
     /// Önce bağlanılacak atlama sunucusu (ProxyJump).
     pub jump: Option<Box<ConnectParams>>,
+    /// Sunucudaki grafik uygulamaları bu bilgisayarda aç.
+    pub x11: bool,
+    /// Kabuksuz bağlantıda SFTP de gerekmez (VNC/RDP tüneli).
+    pub tunnel_only: bool,
 }
 
 pub enum SshInput {
@@ -93,6 +97,7 @@ pub struct SshConn {
     sftp: OnceCell<SftpSession>,
     tunnels: Mutex<HashMap<String, Tunnel>>,
     forwards: RemoteForwards,
+    x11: Option<Arc<crate::x11::X11Ctx>>,
 }
 
 pub struct SshTerm {
@@ -133,6 +138,7 @@ pub struct Client {
     out: Sink,
     ask: AskHostKey,
     forwards: RemoteForwards,
+    x11: Option<Arc<crate::x11::X11Ctx>>,
 }
 
 impl client::Handler for Client {
@@ -187,6 +193,31 @@ impl client::Handler for Client {
         );
         (self.out)(msg.into_bytes());
         Ok(true)
+    }
+
+    /// Sunucudaki bir grafik uygulama ekrana bağlanmak istiyor.
+    async fn server_channel_open_x11(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<()> {
+        let Some(ctx) = self.x11.clone() else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        reply.accept().await;
+        let out = self.out.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::x11::forward(&ctx, channel.into_stream()).await {
+                out(format!("\r\n\x1b[33mX11: {e}\x1b[0m\r\n").into_bytes());
+            }
+        });
+        Ok(())
     }
 
     /// Sunucuda açılan uzak yönlendirme portuna bağlantı geldi: yerel hedefe aktar.
@@ -402,6 +433,7 @@ fn open<'a>(
     out: &'a Sink,
     ask: &'a AskHostKey,
     forwards: &'a RemoteForwards,
+    x11: &'a Option<Arc<crate::x11::X11Ctx>>,
     depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<(Handle, Vec<Handle>)>> + Send + 'a>> {
     Box::pin(async move {
@@ -419,13 +451,14 @@ fn open<'a>(
             port: p.port,
             out: out.clone(),
             ask: ask.clone(),
-            // Yalnızca en sondaki (hedef) bağlantı uzak yönlendirme alır.
+            // Yalnızca en sondaki (hedef) bağlantı uzak yönlendirme ve X11 alır.
             forwards: if depth == 0 { forwards.clone() } else { Arc::default() },
+            x11: if depth == 0 { x11.clone() } else { None },
         };
         let timeout = |_| anyhow!("{}:{} bağlantısı zaman aşımına uğradı", p.host, p.port);
         let (mut handle, chain) = match &p.jump {
             Some(jump) => {
-                let (jh, mut chain) = open(jump, out, ask, forwards, depth + 1).await.map_err(|e| {
+                let (jh, mut chain) = open(jump, out, ask, forwards, &None, depth + 1).await.map_err(|e| {
                     let msg = e.to_string();
                     if msg.contains(AUTH_FAILED) {
                         anyhow!(
@@ -483,7 +516,18 @@ pub async fn connect(
     on_exit: OnExit,
 ) -> Result<SshTerm> {
     let forwards = RemoteForwards::default();
-    let (handle, jumps) = open(&p, &out, &ask, &forwards, 0).await?;
+    let x11 = if p.x11 && p.shell {
+        match crate::x11::X11Ctx::new() {
+            Ok(ctx) => Some(Arc::new(ctx)),
+            Err(e) => {
+                out(format!("\x1b[33mX11 yönlendirme kapalı: {e}\x1b[0m\r\n").into_bytes());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let (handle, jumps) = open(&p, &out, &ask, &forwards, &x11, 0).await?;
 
     let conn = Arc::new(SshConn {
         handle,
@@ -491,11 +535,14 @@ pub async fn connect(
         sftp: OnceCell::new(),
         tunnels: Mutex::new(HashMap::new()),
         forwards,
+        x11,
     });
 
     if !p.shell {
         // SFTP alt sistemi yoksa bağlantı hatası olarak göster.
-        conn.sftp().await?;
+        if !p.tunnel_only {
+            conn.sftp().await?;
+        }
         return Ok(conn.watch(on_exit));
     }
     conn.open_shell(cols, rows, out, on_exit).await
@@ -536,6 +583,11 @@ impl SshConn {
         channel
             .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
             .await?;
+        if let Some(x) = &self.x11 {
+            channel
+                .request_x11(false, false, crate::x11::AUTH_PROTO, x.fake_hex(), 0)
+                .await?;
+        }
         channel.request_shell(false).await?;
         let (mut read, write) = channel.split();
 
@@ -578,6 +630,19 @@ impl SshConn {
             tx: Some(tx),
             conn: self.clone(),
         })
+    }
+
+    /// Sunucu üzerinden bir TCP bağlantısı açar (ssh -W gibi).
+    pub async fn direct_tcpip(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<russh::ChannelStream<client::Msg>> {
+        let ch = self
+            .handle
+            .channel_open_direct_tcpip(host.to_string(), port as u32, "127.0.0.1", 0)
+            .await?;
+        Ok(ch.into_stream())
     }
 
     pub fn is_closed(&self) -> bool {

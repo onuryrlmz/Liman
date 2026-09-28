@@ -11,6 +11,8 @@
   import SettingsDialog from "$lib/SettingsDialog.svelte";
   import SnippetList from "$lib/SnippetList.svelte";
   import LocalPanel from "$lib/LocalPanel.svelte";
+  import VncView from "$lib/VncView.svelte";
+  import RdpView from "$lib/RdpView.svelte";
   import { fileDrag } from "$lib/file-drag.svelte";
   import Palette, { type PaletteItem } from "$lib/Palette.svelte";
   import { settings } from "$lib/settings.svelte";
@@ -35,7 +37,8 @@
   let settingsOpen = $state(false);
   let menu = $state<{ x: number; y: number; items: (MenuItem | null)[] } | null>(null);
   let quick = $state("");
-  let terminals: Record<string, Terminal> = {};
+  /** Panolar: terminal, VNC ya da RDP görünümü; hepsi yeniden bağlanabilir. */
+  let terminals: Record<string, { restart(): void }> = {};
 
   const active = $derived(store.active);
   const sftpTermId = $derived(active?.kind === "ssh" && active.status === "open" ? active.termId : null);
@@ -274,6 +277,7 @@
     if (t.kind === "local") return `Yerel • ${t.shell ?? "varsayılan kabuk"} • ${st}`;
     if (t.kind === "serial") return `Seri port • ${t.connect!.host} • ${t.connect!.port} baud • ${st}`;
     if (t.kind === "telnet") return `Telnet • ${t.connect!.host}:${t.connect!.port} • ${st}`;
+    if (t.kind === "vnc" || t.kind === "rdp") return `${t.kind.toUpperCase()} • ${t.connect!.host}:${t.connect!.port}${t.connect!.jump ? " (SSH tüneli)" : ""} • ${st}`;
     const c = t.connect!;
     return `${t.kind === "sftp" ? "SFTP" : "SSH"} • ${c.username ? c.username + "@" : ""}${c.host}:${c.port} • ${st}`;
   }
@@ -451,14 +455,34 @@
             style:width="{rect.w * 100}%"
             style:height="{rect.h * 100}%"
           >
-            <Terminal
-              bind:this={terminals[tab.key]}
-              {tab}
-              {visible}
-              focused={view?.focus === tab.key}
-              onUpdate={(p) => store.patch(tab.key, p)}
-              onFocus={() => store.focusPane(tab.key)}
-            />
+            {#if tab.kind === "vnc"}
+              <VncView
+                bind:this={terminals[tab.key]}
+                {tab}
+                {visible}
+                focused={view?.focus === tab.key}
+                onUpdate={(p) => store.patch(tab.key, p)}
+                onFocus={() => store.focusPane(tab.key)}
+              />
+            {:else if tab.kind === "rdp"}
+              <RdpView
+                bind:this={terminals[tab.key]}
+                {tab}
+                {visible}
+                focused={view?.focus === tab.key}
+                onUpdate={(p) => store.patch(tab.key, p)}
+                onFocus={() => store.focusPane(tab.key)}
+              />
+            {:else}
+              <Terminal
+                bind:this={terminals[tab.key]}
+                {tab}
+                {visible}
+                focused={view?.focus === tab.key}
+                onUpdate={(p) => store.patch(tab.key, p)}
+                onFocus={() => store.focusPane(tab.key)}
+              />
+            {/if}
             <!-- Yalnızca SFTP: bağlıyken terminalin yerine tam ekran dosya tarayıcısı.
                  Bağlantı koparsa terminal (günlük ve "R ile yeniden bağlan") yeniden görünür. -->
             {#if tab.kind === "sftp" && tab.status === "open" && tab.termId}

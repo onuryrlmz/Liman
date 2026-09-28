@@ -87,6 +87,8 @@ fn test_params(secret: Option<&str>) -> Option<ssh::ConnectParams> {
         secret: secret.map(String::from),
         shell: true,
         jump: None,
+        x11: false,
+        tunnel_only: false,
     })
 }
 
@@ -294,6 +296,7 @@ fn session(name: &str, folder: Option<&str>, auth: store::AuthKind) -> store::Se
         has_secret: false,
         kind: store::SessionKind::Ssh,
         jump: None,
+        x11: false,
         baud: None,
         tunnels: vec![],
     }
@@ -958,4 +961,88 @@ fn serial_port_over_pty() {
     t.send(crate::raw::RawInput::Close).unwrap();
     rx.recv_timeout(Duration::from_secs(5)).expect("kapanış bildirilmedi");
     drop(pair.slave);
+}
+
+#[test]
+fn x11_display_and_cookie_rewrite() {
+    use crate::x11::{cookie_from_xauth, parse_display, rewrite_setup, Display, AUTH_PROTO};
+    #[cfg(unix)]
+    assert_eq!(parse_display(":0"), Some(Display::Unix("/tmp/.X11-unix/X0".into())));
+    #[cfg(unix)]
+    assert_eq!(parse_display("unix:1.0"), Some(Display::Unix("/tmp/.X11-unix/X1".into())));
+    assert_eq!(parse_display("localhost:10.0"), Some(Display::Tcp("localhost".into(), 6010)));
+    assert_eq!(
+        parse_display("/private/tmp/com.apple.launchd.x/org.xquartz:0"),
+        Some(Display::Unix("/private/tmp/com.apple.launchd.x/org.xquartz:0".into()))
+    );
+    assert_eq!(parse_display("bozuk"), None);
+
+    let xauth = "makine/unix:0  MIT-MAGIC-COOKIE-1  00ff10ab\nbaska:1  XDM-AUTHORIZATION-1  1234\n";
+    assert_eq!(cookie_from_xauth(xauth), Some(vec![0x00, 0xff, 0x10, 0xab]));
+
+    let fake = [7u8; 16];
+    let setup = |le: bool, name: &[u8], data: &[u8]| {
+        let p = |v: u16| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        let mut v = vec![if le { b'l' } else { b'B' }, 0];
+        v.extend(p(11));
+        v.extend(p(0));
+        v.extend(p(name.len() as u16));
+        v.extend(p(data.len() as u16));
+        v.extend([0, 0]);
+        v.extend(name);
+        v.extend(std::iter::repeat_n(0, (4 - name.len() % 4) % 4));
+        v.extend(data);
+        v.extend(std::iter::repeat_n(0, (4 - data.len() % 4) % 4));
+        v
+    };
+    for le in [true, false] {
+        let mut pkt = setup(le, AUTH_PROTO.as_bytes(), &fake);
+        pkt.extend(b"sonrasi");
+        // Eksik paket: daha fazla veri beklenir.
+        assert!(rewrite_setup(&pkt[..20], &fake, None).unwrap().is_none());
+        let real = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let mut want = setup(le, AUTH_PROTO.as_bytes(), &real);
+        want.extend(b"sonrasi");
+        assert_eq!(rewrite_setup(&pkt, &fake, Some(&real)).unwrap().unwrap(), want);
+        let mut want = setup(le, b"", b"");
+        want.extend(b"sonrasi");
+        assert_eq!(rewrite_setup(&pkt, &fake, None).unwrap().unwrap(), want);
+        // Yanlış çerez reddedilir.
+        let bad = setup(le, AUTH_PROTO.as_bytes(), &[9u8; 16]);
+        assert!(rewrite_setup(&bad, &fake, None).is_err());
+    }
+}
+
+#[tokio::test]
+async fn raw_streams_direct_and_over_ssh() {
+    use crate::stream::Streams;
+    let echo = echo_server().await;
+    let streams = Streams::default();
+
+    // Doğrudan TCP.
+    let (out, sink) = Output::new();
+    let (on_exit, exited) = exit_signal();
+    streams.open("a".into(), "127.0.0.1", echo, None, sink, on_exit).await.unwrap();
+    streams.write("a", b"dogrudan".to_vec()).unwrap();
+    out.wait_for("dogrudan").await;
+    streams.close("a");
+    tokio::time::timeout(Duration::from_secs(5), exited).await.unwrap().unwrap();
+    assert!(streams.write("a", b"x".to_vec()).is_err());
+
+    // SSH üzerinden (VNC tüneli gibi); bağlantı kabuksuz ve SFTP'siz.
+    let Some(mut params) = test_params(None) else {
+        return;
+    };
+    params.shell = false;
+    params.tunnel_only = true;
+    let (_o, s) = Output::new();
+    let (e, _) = exit_signal();
+    let term = ssh::connect(params, 80, 24, s, accept_all(), e).await.unwrap();
+    let (out, sink) = Output::new();
+    let (on_exit, _) = exit_signal();
+    streams.open("b".into(), "localhost", echo, Some(&term.conn), sink, on_exit).await.unwrap();
+    streams.write("b", b"tunelden".to_vec()).unwrap();
+    out.wait_for("tunelden").await;
+    streams.close("b");
+    term.conn.disconnect().await;
 }

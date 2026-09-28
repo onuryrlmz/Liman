@@ -24,6 +24,12 @@ Tauri 2 (Rust) + Svelte 5 + xterm.js.
 - MultiExec: yazılanı sekmedeki tüm panolara ya da tüm sekmelere gönderme
 - Komut parçacıkları ve komut paleti (⌘P / Ctrl+Shift+P)
 - Oturum kaydı: terminal çıktısı renk kodlarından arındırılmış düz metin olarak dosyaya
+- Çift panelli SFTP (yerel ↔ uzak sürükle-bırak), klasör karşılaştırma ve eşitleme
+- Uzak dosyayı bilgisayardaki editörde açma; kaydettikçe sunucuya yüklenir
+- Tüneller: yerel (-L), uzak (-R) ve SOCKS5 (-D); oturuma kaydedilip bağlanınca başlatılabilir
+- Telnet ve seri port oturumları
+- VNC (uygulama içinde, noVNC) ve RDP (bilgisayardaki istemciyle); ikisi de istenirse SSH tüneli üzerinden
+- X11 yönlendirme (macOS'ta XQuartz, Windows'ta VcXsrv gerekir)
 - SSH bağlanınca otomatik açılan SFTP paneli: gezinme, yükleme/indirme (klasörler dahil,
   ilerleme göstergesiyle), sürükle-bırak yükleme, yeniden adlandırma, silme, yeni klasör,
   uzak dosyayı düzenleme

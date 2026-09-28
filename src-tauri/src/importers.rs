@@ -36,6 +36,7 @@ fn new_session(name: &str, host: &str) -> Session {
         has_secret: false,
         kind: SessionKind::Ssh,
         jump: None,
+        x11: false,
         baud: None,
         tunnels: vec![],
     }

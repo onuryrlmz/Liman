@@ -7,6 +7,8 @@ mod logger;
 mod sftp;
 mod ssh;
 mod store;
+mod stream;
+mod x11;
 mod sync;
 
 use std::{collections::HashMap, fmt::Display, path::PathBuf, sync::Arc, sync::Mutex};
@@ -27,6 +29,7 @@ enum Term {
 #[derive(Default)]
 struct AppState {
     terms: Mutex<HashMap<String, Term>>,
+    streams: stream::Streams,
     /// Cevap bekleyen sunucu anahtarı soruları.
     host_key_questions: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
 }
@@ -120,6 +123,11 @@ struct ConnectRequest {
     sftp_only: bool,
     #[serde(default)]
     jump: Option<String>,
+    #[serde(default)]
+    x11: bool,
+    /// Kabuk ve SFTP olmadan, yalnızca tünel için (VNC/RDP).
+    #[serde(default)]
+    tunnel_only: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -172,6 +180,8 @@ fn resolve_jump(spec: &str, depth: usize) -> Result<ssh::ConnectParams, String> 
                 Some(j) => Some(Box::new(resolve_jump(j, depth + 1)?)),
                 None => None,
             },
+            x11: false,
+            tunnel_only: true,
         });
     }
     let (user, rest) = match spec.rsplit_once('@') {
@@ -194,6 +204,8 @@ fn resolve_jump(spec: &str, depth: usize) -> Result<ssh::ConnectParams, String> 
         secret: None,
         shell: false,
         jump: None,
+        x11: false,
+        tunnel_only: true,
     })
 }
 
@@ -226,7 +238,9 @@ async fn ssh_connect(
         auth: req.auth,
         key_path: req.key_path,
         secret,
-        shell: !req.sftp_only,
+        shell: !req.sftp_only && !req.tunnel_only,
+        x11: req.x11,
+        tunnel_only: req.tunnel_only,
         jump: match req.jump.as_deref().map(str::trim).filter(|j| !j.is_empty()) {
             Some(j) => Some(Box::new(resolve_jump(j, 0)?)),
             None => None,
@@ -265,6 +279,91 @@ async fn telnet_connect(
         .map_err(err)?;
     state.terms.lock().unwrap().insert(id.clone(), Term::Raw(term));
     Ok(id)
+}
+
+/// VNC gibi arayüzde çalışan protokoller için ham TCP akışı; `via` bir SSH bağlantısıysa onun üzerinden.
+#[tauri::command]
+async fn stream_open(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    via: Option<String>,
+    on_data: Channel<InvokeResponseBody>,
+) -> CmdResult<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let conn = match via {
+        Some(v) => Some(state.conn(&v)?),
+        None => None,
+    };
+    state
+        .streams
+        .open(id.clone(), host.trim(), port, conn.as_deref(), sink(on_data, None), on_exit(app, id.clone()))
+        .await
+        .map_err(err)?;
+    Ok(id)
+}
+
+/// Gövde ham bayt; akış kimliği `x-stream` başlığında.
+#[tauri::command]
+fn stream_write(state: State<'_, AppState>, request: tauri::ipc::Request<'_>) -> CmdResult<()> {
+    let id = request
+        .headers()
+        .get("x-stream")
+        .and_then(|v| v.to_str().ok())
+        .ok_or("Akış kimliği yok")?;
+    let tauri::ipc::InvokeBody::Raw(data) = request.body() else {
+        return Err("Ham veri bekleniyordu".into());
+    };
+    state.streams.write(id, data.clone()).map_err(err)
+}
+
+#[tauri::command]
+fn stream_close(state: State<'_, AppState>, id: String) {
+    state.streams.close(&id);
+}
+
+/// VNC/RDP oturumunun kayıtlı parolası (yalnızca bu türler için arayüze verilir).
+#[tauri::command]
+fn session_password(session_id: String) -> CmdResult<Option<String>> {
+    let sessions = store::load_sessions().map_err(err)?;
+    let s = sessions.iter().find(|s| s.id == session_id).ok_or("Oturum bulunamadı")?;
+    if !matches!(s.kind, store::SessionKind::Vnc | store::SessionKind::Rdp) {
+        return Err("Bu oturum türünün parolası arayüze verilmez".into());
+    }
+    Ok(store::get_secret(&s.id))
+}
+
+/// RDP: bilgisayardaki istemci için .rdp dosyası yazar. `via` verilirse önce SSH tüneli açılır.
+#[tauri::command]
+async fn rdp_prepare(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    username: String,
+    via: Option<String>,
+) -> CmdResult<(String, String)> {
+    let (addr, tport) = match via {
+        Some(v) => {
+            let conn = state.conn(&v)?;
+            let t = conn
+                .start_tunnel(ssh::TunnelKind::Local, String::new(), 0, host.trim().to_string(), port)
+                .await
+                .map_err(err)?;
+            ("127.0.0.1".to_string(), t.listen_port)
+        }
+        None => (host.trim().to_string(), port),
+    };
+    let target = format!("{addr}:{tport}");
+    let dir = store::config_dir().join("rdp");
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    let path = dir.join(format!("{}.rdp", uuid::Uuid::new_v4()));
+    let mut body = format!("full address:s:{target}\r\nprompt for credentials:i:1\r\nscreen mode id:i:1\r\n");
+    if !username.trim().is_empty() {
+        body += &format!("username:s:{}\r\n", username.trim());
+    }
+    std::fs::write(&path, body).map_err(err)?;
+    Ok((path.to_string_lossy().into_owned(), target))
 }
 
 #[tauri::command]
@@ -725,6 +824,11 @@ pub fn run() {
             telnet_connect,
             serial_ports,
             serial_connect,
+            stream_open,
+            stream_write,
+            stream_close,
+            session_password,
+            rdp_prepare,
             term_write,
             term_resize,
             term_close,

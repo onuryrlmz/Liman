@@ -6,7 +6,7 @@ export type TabStatus = "connecting" | "open" | "closed" | "error";
 export interface Pane {
   key: string;
   /** telnet: connect.host/port; serial: connect.host = aygıt, connect.port = baud. */
-  kind: "local" | "ssh" | "sftp" | "telnet" | "serial";
+  kind: "local" | "ssh" | "sftp" | "telnet" | "serial" | "vnc" | "rdp";
   title: string;
   status: TabStatus;
   termId: string | null;
@@ -226,6 +226,15 @@ class Store {
       const port = s.kind === "serial" ? (s.baud ?? 115200) : s.port;
       return this.openSsh({ sessionId: s.id, host: s.host, port, username: "", auth: "auto" }, s.name || s.host, s, s.kind);
     }
+    if (s.kind === "vnc" || s.kind === "rdp") {
+      // jump: tünelin kurulacağı SSH sunucusu.
+      return this.openSsh(
+        { sessionId: s.id, host: s.host, port: s.port, username: s.username, auth: "auto", jump: s.jump },
+        s.name || s.host,
+        s,
+        s.kind,
+      );
+    }
     this.openSsh(
       {
         sessionId: s.id,
@@ -236,6 +245,7 @@ class Store {
         keyPath: s.keyPath,
         sftpOnly,
         jump: s.jump,
+        x11: s.x11,
       },
       s.name || s.host,
       s,
@@ -246,7 +256,7 @@ class Store {
   private clonePane(p: Pane, share: boolean): Pane {
     if (p.kind === "local") return this.localPane(p.shell ?? null);
     const s = this.sessions.find((x) => x.id === p.sessionId);
-    if (p.kind === "telnet" || p.kind === "serial") return this.sshPane({ ...p.connect! }, p.title, s, p.kind);
+    if (p.kind !== "ssh" && p.kind !== "sftp") return this.sshPane({ ...p.connect! }, p.title, s, p.kind);
     // Bölmede SFTP panosundan da terminal açılır; aynı bağlantı paylaşılır.
     const pane = this.sshPane({ ...p.connect!, sftpOnly: share ? false : p.connect!.sftpOnly }, p.title, s);
     if (share && p.termId && p.status === "open") pane.shareFrom = p.termId;

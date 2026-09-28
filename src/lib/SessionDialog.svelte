@@ -28,15 +28,20 @@
     { key: "sftp", title: "Yalnızca SFTP", desc: "Dosya tarayıcısı" },
     { key: "telnet", title: "Telnet", desc: "Ağ cihazları, eski sistemler" },
     { key: "serial", title: "Seri port", desc: "USB-seri, konsol kablosu" },
+    { key: "vnc", title: "VNC", desc: "Uzak masaüstü, uygulama içinde" },
+    { key: "rdp", title: "RDP", desc: "Windows uzak masaüstü" },
   ];
+  const defaultPorts: Partial<Record<SessionKind, number>> = { ssh: 22, sftp: 22, telnet: 23, vnc: 5900, rdp: 3389 };
+  const isDesktop = $derived(form.kind === "vnc" || form.kind === "rdp");
   const bauds = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 
   function setKind(k: SessionKind) {
-    const wasTelnet = form.kind === "telnet";
+    const prevDefault = defaultPorts[form.kind ?? "ssh"];
     form.kind = k;
     // Varsayılan portu türe göre ayarla (kullanıcı değiştirmediyse).
-    if (k === "telnet" && form.port === 22) form.port = 23;
-    if ((k === "ssh" || k === "sftp") && wasTelnet && form.port === 23) form.port = 22;
+    if (defaultPorts[k] && (!form.port || form.port === prevDefault)) form.port = defaultPorts[k]!;
+    // VNC/RDP'de "atlama sunucusu" SSH tüneli anlamına gelir; SSH'den gelen değeri taşıma.
+    if (k === "vnc" || k === "rdp") jumpMode = jumpMode === "custom" ? "custom" : jumpMode;
     if (k === "serial") {
       form.baud ??= 115200;
       loadPorts();
@@ -50,7 +55,7 @@
   if (initial.kind === "serial") loadPorts();
 
   // Atlama sunucusu: kayıtlı bir oturum ya da elle yazılan "kullanıcı@sunucu:port".
-  const jumpCandidates = $derived(store.sessions.filter((s) => s.id !== form.id && s.kind !== "sftp"));
+  const jumpCandidates = $derived(store.sessions.filter((s) => s.id !== form.id && (s.kind ?? "ssh") === "ssh"));
   let jumpMode = $state<string>(
     !initial.jump ? "" : store.sessions.some((s) => s.id === initial.jump) ? initial.jump : "custom",
   );
@@ -78,7 +83,8 @@
           folder: form.folder?.trim() || null,
           keyPath: form.keyPath?.trim() || null,
           port: Number(form.port) || 22,
-          jump: !isSsh ? null : jumpMode === "custom" ? jumpCustom.trim() || null : jumpMode || null,
+          jump: !isSsh && !isDesktop ? null : jumpMode === "custom" ? jumpCustom.trim() || null : jumpMode || null,
+          x11: form.kind === "ssh" ? !!form.x11 : false,
           baud: form.kind === "serial" ? Number(form.baud) || 115200 : null,
         },
         forget ? "" : secret ? secret : null,
@@ -182,6 +188,33 @@
         <input type="checkbox" bind:checked={forget} /> Kayıtlı parolayı sil
       </label>
     {/if}
+    {#if form.kind === "ssh"}
+      <label class="check full">
+        <input type="checkbox" bind:checked={form.x11} />
+        <span>X11 yönlendirme <small>Sunucudaki grafik uygulamalar bu bilgisayarda açılır (macOS'ta XQuartz, Windows'ta VcXsrv gerekir)</small></span>
+      </label>
+    {/if}
+    {/if}
+    {#if isDesktop}
+      <label class="full">
+        <span>Kullanıcı adı {form.kind === "vnc" ? "(bazı VNC sunucuları ister)" : ""}</span>
+        <input bind:value={form.username} placeholder="isteğe bağlı" spellcheck="false" />
+      </label>
+      {#if form.kind === "vnc"}
+        <label class="full">
+          <span>VNC parolası</span>
+          <input
+            type="password"
+            bind:value={secret}
+            disabled={forget}
+            placeholder={session?.hasSecret ? "•••••• (kayıtlı, değiştirmek için yazın)" : "boş bırakılırsa bağlanırken sorulur"}
+          />
+          <small>Parola işletim sisteminin kasasında tutulur.</small>
+        </label>
+        {#if session?.hasSecret}
+          <label class="check full"><input type="checkbox" bind:checked={forget} /> Kayıtlı parolayı sil</label>
+        {/if}
+      {/if}
     {/if}
     <label>
       <span>Görünen ad</span>
@@ -194,11 +227,11 @@
         {#each folders as f}<option value={f}></option>{/each}
       </datalist>
     </label>
-    {#if isSsh}
+    {#if isSsh || isDesktop}
     <label class="full">
-      <span>Atlama sunucusu (ProxyJump)</span>
+      <span>{isDesktop ? "SSH tüneli üzerinden bağlan" : "Atlama sunucusu (ProxyJump)"}</span>
       <select bind:value={jumpMode}>
-        <option value="">Yok, doğrudan bağlan</option>
+        <option value="">{isDesktop ? "Hayır, doğrudan bağlan" : "Yok, doğrudan bağlan"}</option>
         {#each jumpCandidates as j (j.id)}
           <option value={j.id}>{j.name} — {j.username ? j.username + "@" : ""}{j.host}</option>
         {/each}
@@ -211,6 +244,9 @@
         <input bind:value={jumpCustom} placeholder="ops@bastion.example.com:22  (zincir için virgülle ayırın)" spellcheck="false" />
         <small>Bu sunucuya ssh-agent ya da ~/.ssh anahtarlarıyla bağlanılır. Parola gerekiyorsa onu ayrı bir oturum olarak kaydedip listeden seçin.</small>
       </label>
+    {/if}
+    {#if isDesktop && jumpMode}
+      <small class="full hint">Sunucu adresi, seçilen SSH sunucusunun gözünden yazılır (ör. <code>localhost</code> ya da iç ağ adresi).</small>
     {/if}
     {/if}
     {#if error}<p class="err full">{error}</p>{/if}
@@ -241,7 +277,7 @@
   }
   .kind {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 8px;
   }
   .kind button {
@@ -292,6 +328,11 @@
   }
   .row input {
     flex: 1;
+  }
+  .hint {
+    color: var(--muted);
+    font-size: 11.5px;
+    margin-top: -6px;
   }
   .err {
     margin: 0;

@@ -1,7 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 export type AuthKind = "auto" | "password" | "key";
-export type SessionKind = "ssh" | "sftp" | "telnet" | "serial";
+export type SessionKind = "ssh" | "sftp" | "telnet" | "serial" | "vnc" | "rdp";
 
 export interface Session {
   id: string;
@@ -20,6 +20,8 @@ export interface Session {
   tunnels?: TunnelSpec[];
   /** Seri port hızı (aygıt yolu `host` alanında). */
   baud?: number | null;
+  /** SSH: sunucudaki grafik uygulamaları bu bilgisayarda aç. */
+  x11?: boolean;
 }
 
 export interface ConnectRequest {
@@ -34,6 +36,9 @@ export interface ConnectRequest {
   /** Kabuk açmadan yalnızca SFTP. */
   sftpOnly?: boolean;
   jump?: string | null;
+  x11?: boolean;
+  /** Kabuk ve SFTP olmadan, yalnızca tünel için (VNC/RDP). */
+  tunnelOnly?: boolean;
 }
 
 export interface Snippet {
@@ -157,6 +162,13 @@ export const api = {
   serialPorts: () => invoke<{ path: string; description: string }[]>("serial_ports"),
   serialConnect: (path: string, baud: number, onData: (d: Uint8Array) => void, logName: string) =>
     invoke<string>("serial_connect", { path, baud, onData: dataChannel(onData), logName }),
+  streamOpen: (host: string, port: number, via: string | null, onData: (d: Uint8Array) => void) =>
+    invoke<string>("stream_open", { host, port, via, onData: dataChannel(onData) }),
+  streamWrite: (id: string, data: Uint8Array) => invoke<void>("stream_write", data, { headers: { "x-stream": id } }),
+  streamClose: (id: string) => invoke<void>("stream_close", { id }),
+  sessionPassword: (sessionId: string) => invoke<string | null>("session_password", { sessionId }),
+  rdpPrepare: (host: string, port: number, username: string, via: string | null) =>
+    invoke<[string, string]>("rdp_prepare", { host, port, username, via }),
   hostKeyAnswer: (id: string, accept: boolean) => invoke<void>("host_key_answer", { id, accept }),
   importPreview: (source: "ssh-config" | "mobaxterm", path: string | null) =>
     invoke<ImportPreview>("import_preview", { source, path }),
@@ -240,6 +252,8 @@ export const kindInfo: Record<SessionKind, { icon: string; badge: string | null;
   sftp: { icon: "folder", badge: "SFTP", label: "SFTP" },
   telnet: { icon: "terminal", badge: "TELNET", label: "Telnet" },
   serial: { icon: "plug", badge: "SERİ", label: "Seri port" },
+  vnc: { icon: "monitor", badge: "VNC", label: "VNC" },
+  rdp: { icon: "monitor", badge: "RDP", label: "RDP" },
 };
 
 export function errText(e: unknown) {

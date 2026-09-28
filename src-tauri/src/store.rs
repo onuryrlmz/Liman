@@ -31,6 +31,10 @@ pub enum SessionKind {
     Telnet,
     /// Seri port; aygıt yolu `host` alanında.
     Serial,
+    /// Uzak masaüstü (uygulama içinde, noVNC).
+    Vnc,
+    /// Uzak masaüstü (bilgisayardaki RDP istemcisiyle).
+    Rdp,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -57,6 +61,9 @@ pub struct Session {
     /// Atlama sunucusu: kayıtlı bir oturumun kimliği ya da "kullanıcı@sunucu:port".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
+    /// SSH oturumunda X11 yönlendirme.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub x11: bool,
     /// Seri port oturumunda baud hızı (aygıt yolu `host` alanındadır).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baud: Option<u32>,
