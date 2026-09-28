@@ -1,7 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 export type AuthKind = "auto" | "password" | "key";
-export type SessionKind = "ssh" | "sftp";
+export type SessionKind = "ssh" | "sftp" | "telnet" | "serial";
 
 export interface Session {
   id: string;
@@ -16,6 +16,10 @@ export interface Session {
   kind?: SessionKind;
   /** Atlama sunucusu: kayıtlı oturum kimliği ya da "kullanıcı@sunucu:port". */
   jump?: string | null;
+  /** Bağlanınca otomatik başlatılan tüneller. */
+  tunnels?: TunnelSpec[];
+  /** Seri port hızı (aygıt yolu `host` alanında). */
+  baud?: number | null;
 }
 
 export interface ConnectRequest {
@@ -64,11 +68,19 @@ export interface Entry {
   perms: string;
 }
 
-export interface TunnelInfo {
+export type TunnelKind = "local" | "remote" | "socks";
+
+/** Kaydedilebilir tünel tanımı. */
+export interface TunnelSpec {
+  kind: TunnelKind;
+  listenHost: string;
+  listenPort: number;
+  targetHost: string;
+  targetPort: number;
+}
+
+export interface TunnelInfo extends TunnelSpec {
   id: string;
-  localPort: number;
-  remoteHost: string;
-  remotePort: number;
 }
 
 export interface Transfer {
@@ -120,6 +132,10 @@ export const api = {
     invoke<string>("ssh_connect", { req, cols, rows, onData: dataChannel(onData), logName }),
   sshShare: (source: string, cols: number, rows: number, onData: (d: Uint8Array) => void, logName: string) =>
     invoke<string>("ssh_share", { source, cols, rows, onData: dataChannel(onData), logName }),
+  localList: (path: string) => invoke<{ path: string; parent: string | null; entries: Entry[] }>("local_list", { path }),
+  localMkdir: (parent: string, name: string) => invoke<void>("local_mkdir", { parent, name }),
+  localRename: (path: string, name: string) => invoke<void>("local_rename", { path, name }),
+  localRemove: (path: string) => invoke<void>("local_remove", { path }),
   logDefaultDir: () => invoke<string>("log_default_dir"),
   termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),
@@ -136,6 +152,11 @@ export const api = {
   sessionsExport: (path: string, password: string | null, group: string | null) =>
     invoke<ExportResult>("sessions_export", { path, password, group }),
   sessionsImportInfo: (path: string) => invoke<BackupFileInfo>("sessions_import_info", { path }),
+  telnetConnect: (host: string, port: number, cols: number, rows: number, onData: (d: Uint8Array) => void, logName: string) =>
+    invoke<string>("telnet_connect", { host, port, cols, rows, onData: dataChannel(onData), logName }),
+  serialPorts: () => invoke<{ path: string; description: string }[]>("serial_ports"),
+  serialConnect: (path: string, baud: number, onData: (d: Uint8Array) => void, logName: string) =>
+    invoke<string>("serial_connect", { path, baud, onData: dataChannel(onData), logName }),
   hostKeyAnswer: (id: string, accept: boolean) => invoke<void>("host_key_answer", { id, accept }),
   importPreview: (source: "ssh-config" | "mobaxterm", path: string | null) =>
     invoke<ImportPreview>("import_preview", { source, path }),
@@ -153,13 +174,17 @@ export const api = {
   sftpRemove: (id: string, path: string, isDir: boolean) => invoke<void>("sftp_remove", { id, path, isDir }),
   sftpReadText: (id: string, path: string) => invoke<string>("sftp_read_text", { id, path }),
   sftpWriteText: (id: string, path: string, text: string) => invoke<void>("sftp_write_text", { id, path, text }),
+  syncCompare: (id: string, local: string, remote: string) =>
+    invoke<{ diffs: unknown[]; same: number; truncated: boolean }>("sync_compare", { id, local, remote }),
+  syncApply: (id: string, local: string, remote: string, actions: { path: string; direction: "upload" | "download" }[]) =>
+    invoke<number>("sync_apply", { id, local, remote, actions }),
+  sftpEditLocal: (id: string, remote: string) => invoke<string>("sftp_edit_local", { id, remote }),
   sftpDownload: (id: string, remote: string, local: string, transferId: string) =>
     invoke<void>("sftp_download", { id, remote, local, transferId }),
   sftpUpload: (id: string, local: string, remoteDir: string, transferId: string) =>
     invoke<void>("sftp_upload", { id, local, remoteDir, transferId }),
 
-  tunnelStart: (id: string, localPort: number, remoteHost: string, remotePort: number) =>
-    invoke<TunnelInfo>("tunnel_start", { id, localPort, remoteHost, remotePort }),
+  tunnelStart: (id: string, t: TunnelSpec) => invoke<TunnelInfo>("tunnel_start", { id, ...t }),
   tunnelStop: (id: string, tunnelId: string) => invoke<void>("tunnel_stop", { id, tunnelId }),
   tunnelList: (id: string) => invoke<TunnelInfo[]>("tunnel_list", { id }),
 };
@@ -193,19 +218,29 @@ export function formatDate(secs: number | null) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** "[sftp://]kullanici@host:port" biçimini çözer. */
+/** "[ssh|sftp|telnet://]kullanici@host:port" biçimini çözer. */
 export function parseQuick(
   s: string,
-): { username: string; host: string; port: number; sftpOnly: boolean } | null {
-  const m = s.trim().match(/^(?:(ssh|sftp):\/\/)?(?:([^@\s]+)@)?([^:\s/]+)(?::(\d+))?\/?$/i);
+): { username: string; host: string; port: number; sftpOnly: boolean; telnet: boolean } | null {
+  const m = s.trim().match(/^(?:(ssh|sftp|telnet):\/\/)?(?:([^@\s]+)@)?([^:\s/]+)(?::(\d+))?\/?$/i);
   if (!m) return null;
+  const scheme = m[1]?.toLowerCase();
   return {
     username: m[2] ?? "",
     host: m[3],
-    port: m[4] ? Number(m[4]) : 22,
-    sftpOnly: m[1]?.toLowerCase() === "sftp",
+    port: m[4] ? Number(m[4]) : scheme === "telnet" ? 23 : 22,
+    sftpOnly: scheme === "sftp",
+    telnet: scheme === "telnet",
   };
 }
+
+/** Oturum türü için simge ve kısa etiket. */
+export const kindInfo: Record<SessionKind, { icon: string; badge: string | null; label: string }> = {
+  ssh: { icon: "server", badge: null, label: "SSH" },
+  sftp: { icon: "folder", badge: "SFTP", label: "SFTP" },
+  telnet: { icon: "terminal", badge: "TELNET", label: "Telnet" },
+  serial: { icon: "plug", badge: "SERİ", label: "Seri port" },
+};
 
 export function errText(e: unknown) {
   return typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e);

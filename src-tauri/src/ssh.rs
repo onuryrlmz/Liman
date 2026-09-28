@@ -20,7 +20,7 @@ use russh::{
     ChannelMsg, Disconnect,
 };
 use russh_sftp::client::SftpSession;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot, OnceCell},
@@ -54,18 +54,36 @@ pub enum SshInput {
     Close,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelKind {
+    /// Bu bilgisayarda dinle → sunucunun ulaştığı adrese (ssh -L).
+    Local,
+    /// Sunucuda dinle → bu bilgisayarın ulaştığı adrese (ssh -R).
+    Remote,
+    /// Bu bilgisayarda SOCKS5 vekil sunucu; hedefi istemci seçer (ssh -D).
+    Socks,
+}
+
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TunnelInfo {
     pub id: String,
-    pub local_port: u16,
-    pub remote_host: String,
-    pub remote_port: u16,
+    pub kind: TunnelKind,
+    pub listen_host: String,
+    pub listen_port: u16,
+    /// SOCKS'ta boş.
+    pub target_host: String,
+    pub target_port: u16,
 }
+
+/// Uzak yönlendirmeler: sunucudaki port → yerel hedef.
+pub type RemoteForwards = Arc<Mutex<HashMap<u32, (String, u16)>>>;
 
 struct Tunnel {
     info: TunnelInfo,
-    task: tokio::task::AbortHandle,
+    /// Yerel dinleyici (yerel ve SOCKS tünellerde).
+    task: Option<tokio::task::AbortHandle>,
 }
 
 pub struct SshConn {
@@ -74,6 +92,7 @@ pub struct SshConn {
     jumps: Vec<client::Handle<Client>>,
     sftp: OnceCell<SftpSession>,
     tunnels: Mutex<HashMap<String, Tunnel>>,
+    forwards: RemoteForwards,
 }
 
 pub struct SshTerm {
@@ -113,6 +132,7 @@ pub struct Client {
     port: u16,
     out: Sink,
     ask: AskHostKey,
+    forwards: RemoteForwards,
 }
 
 impl client::Handler for Client {
@@ -168,6 +188,86 @@ impl client::Handler for Client {
         (self.out)(msg.into_bytes());
         Ok(true)
     }
+
+    /// Sunucuda açılan uzak yönlendirme portuna bağlantı geldi: yerel hedefe aktar.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<()> {
+        let target = self.forwards.lock().unwrap().get(&connected_port).cloned();
+        let Some((host, port)) = target else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+            Ok(mut sock) => {
+                reply.accept().await;
+                tokio::spawn(async move {
+                    let mut stream = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut sock, &mut stream).await;
+                });
+            }
+            Err(_) => reply.reject(russh::ChannelOpenFailure::ConnectFailed).await,
+        }
+        Ok(())
+    }
+}
+
+// ---------- SOCKS5 ----------
+
+/// SOCKS5 el sıkışması (yalnızca kimliksiz CONNECT). Hedef adres ve portu döndürür.
+async fn socks5_request(sock: &mut tokio::net::TcpStream) -> Result<(String, u16)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut head = [0u8; 2];
+    sock.read_exact(&mut head).await?;
+    if head[0] != 5 {
+        bail!("SOCKS5 değil");
+    }
+    let mut methods = vec![0u8; head[1] as usize];
+    sock.read_exact(&mut methods).await?;
+    if !methods.contains(&0) {
+        sock.write_all(&[5, 0xff]).await?;
+        bail!("Desteklenen kimlik doğrulama yöntemi yok");
+    }
+    sock.write_all(&[5, 0]).await?;
+    let mut req = [0u8; 4];
+    sock.read_exact(&mut req).await?;
+    if req[1] != 1 {
+        // Yalnızca CONNECT.
+        sock.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+        bail!("Desteklenmeyen SOCKS komutu");
+    }
+    let host = match req[3] {
+        1 => {
+            let mut a = [0u8; 4];
+            sock.read_exact(&mut a).await?;
+            std::net::Ipv4Addr::from(a).to_string()
+        }
+        3 => {
+            let mut len = [0u8; 1];
+            sock.read_exact(&mut len).await?;
+            let mut name = vec![0u8; len[0] as usize];
+            sock.read_exact(&mut name).await?;
+            String::from_utf8(name)?
+        }
+        4 => {
+            let mut a = [0u8; 16];
+            sock.read_exact(&mut a).await?;
+            std::net::Ipv6Addr::from(a).to_string()
+        }
+        _ => bail!("Geçersiz adres türü"),
+    };
+    let mut port = [0u8; 2];
+    sock.read_exact(&mut port).await?;
+    Ok((host, u16::from_be_bytes(port)))
 }
 
 async fn try_key(h: &mut client::Handle<Client>, user: &str, key: keys::PrivateKey) -> Result<bool> {
@@ -301,6 +401,7 @@ fn open<'a>(
     p: &'a ConnectParams,
     out: &'a Sink,
     ask: &'a AskHostKey,
+    forwards: &'a RemoteForwards,
     depth: usize,
 ) -> Pin<Box<dyn Future<Output = Result<(Handle, Vec<Handle>)>> + Send + 'a>> {
     Box::pin(async move {
@@ -318,11 +419,13 @@ fn open<'a>(
             port: p.port,
             out: out.clone(),
             ask: ask.clone(),
+            // Yalnızca en sondaki (hedef) bağlantı uzak yönlendirme alır.
+            forwards: if depth == 0 { forwards.clone() } else { Arc::default() },
         };
         let timeout = |_| anyhow!("{}:{} bağlantısı zaman aşımına uğradı", p.host, p.port);
         let (mut handle, chain) = match &p.jump {
             Some(jump) => {
-                let (jh, mut chain) = open(jump, out, ask, depth + 1).await.map_err(|e| {
+                let (jh, mut chain) = open(jump, out, ask, forwards, depth + 1).await.map_err(|e| {
                     let msg = e.to_string();
                     if msg.contains(AUTH_FAILED) {
                         anyhow!(
@@ -379,13 +482,15 @@ pub async fn connect(
     ask: AskHostKey,
     on_exit: OnExit,
 ) -> Result<SshTerm> {
-    let (handle, jumps) = open(&p, &out, &ask, 0).await?;
+    let forwards = RemoteForwards::default();
+    let (handle, jumps) = open(&p, &out, &ask, &forwards, 0).await?;
 
     let conn = Arc::new(SshConn {
         handle,
         jumps,
         sftp: OnceCell::new(),
         tunnels: Mutex::new(HashMap::new()),
+        forwards,
     });
 
     if !p.shell {
@@ -494,7 +599,9 @@ impl SshConn {
 
     pub async fn disconnect(&self) {
         for (_, t) in self.tunnels.lock().unwrap().drain() {
-            t.task.abort();
+            if let Some(task) = t.task {
+                task.abort();
+            }
         }
         let _ = self
             .handle
@@ -505,58 +612,126 @@ impl SshConn {
         }
     }
 
-    pub async fn start_tunnel(
+    fn add_tunnel(&self, info: TunnelInfo, task: Option<tokio::task::AbortHandle>) -> TunnelInfo {
+        self.tunnels.lock().unwrap().insert(info.id.clone(), Tunnel { info: info.clone(), task });
+        info
+    }
+
+    /// Yerel dinleyici açar. SOCKS'ta hedef her bağlantıda el sıkışmasıyla belirlenir.
+    async fn listen_local(
         self: &Arc<Self>,
-        local_port: u16,
-        remote_host: String,
-        remote_port: u16,
-    ) -> Result<TunnelInfo> {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port))
+        port: u16,
+        socks: bool,
+        target: (String, u16),
+    ) -> Result<(u16, tokio::task::AbortHandle)> {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
-            .with_context(|| format!("127.0.0.1:{local_port} dinlenemiyor"))?;
-        let local_port = listener.local_addr()?.port();
+            .with_context(|| format!("127.0.0.1:{port} dinlenemiyor (port kullanımda olabilir)"))?;
+        let port = listener.local_addr()?.port();
         let conn = Arc::downgrade(self);
-        let rhost = remote_host.clone();
         let task = tokio::spawn(async move {
             while let Ok((mut sock, peer)) = listener.accept().await {
                 let Some(conn) = conn.upgrade() else { break };
-                let rhost = rhost.clone();
+                let target = target.clone();
                 tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let (host, tport) = if socks {
+                        match socks5_request(&mut sock).await {
+                            Ok(t) => t,
+                            Err(_) => return,
+                        }
+                    } else {
+                        target
+                    };
                     let ch = conn
                         .handle
-                        .channel_open_direct_tcpip(
-                            rhost,
-                            remote_port as u32,
-                            peer.ip().to_string(),
-                            peer.port() as u32,
-                        )
+                        .channel_open_direct_tcpip(host, tport as u32, peer.ip().to_string(), peer.port() as u32)
                         .await;
-                    if let Ok(ch) = ch {
-                        let mut stream = ch.into_stream();
-                        let _ = tokio::io::copy_bidirectional(&mut sock, &mut stream).await;
+                    match ch {
+                        Ok(ch) => {
+                            if socks && sock.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.is_err() {
+                                return;
+                            }
+                            let mut stream = ch.into_stream();
+                            let _ = tokio::io::copy_bidirectional(&mut sock, &mut stream).await;
+                        }
+                        // Hedefe ulaşılamadı.
+                        Err(_) if socks => {
+                            let _ = sock.write_all(&[5, 5, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+                        }
+                        Err(_) => {}
                     }
                 });
             }
         });
-        let info = TunnelInfo {
-            id: uuid::Uuid::new_v4().to_string(),
-            local_port,
-            remote_host,
-            remote_port,
-        };
-        self.tunnels.lock().unwrap().insert(
-            info.id.clone(),
-            Tunnel {
-                info: info.clone(),
-                task: task.abort_handle(),
-            },
-        );
-        Ok(info)
+        Ok((port, task.abort_handle()))
     }
 
-    pub fn stop_tunnel(&self, id: &str) {
-        if let Some(t) = self.tunnels.lock().unwrap().remove(id) {
-            t.task.abort();
+    pub async fn start_tunnel(
+        self: &Arc<Self>,
+        kind: TunnelKind,
+        listen_host: String,
+        listen_port: u16,
+        target_host: String,
+        target_port: u16,
+    ) -> Result<TunnelInfo> {
+        let id = uuid::Uuid::new_v4().to_string();
+        match kind {
+            TunnelKind::Local | TunnelKind::Socks => {
+                let socks = kind == TunnelKind::Socks;
+                let (port, task) = self
+                    .listen_local(listen_port, socks, (target_host.clone(), target_port))
+                    .await?;
+                let info = TunnelInfo {
+                    id,
+                    kind,
+                    listen_host: "127.0.0.1".into(),
+                    listen_port: port,
+                    target_host: if socks { String::new() } else { target_host },
+                    target_port: if socks { 0 } else { target_port },
+                };
+                Ok(self.add_tunnel(info, Some(task)))
+            }
+            TunnelKind::Remote => {
+                let bind = if listen_host.trim().is_empty() { "localhost".to_string() } else { listen_host };
+                let port = self
+                    .handle
+                    .tcpip_forward(bind.clone(), listen_port as u32)
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "Sunucu {bind}:{listen_port} yönlendirmesini reddetti ({e}). \
+                             AllowTcpForwarding kapalı ya da port kullanımda olabilir."
+                        )
+                    })?;
+                // Sunucu 0 isteğine ayırdığı portu döndürür; belirli port istenince 0 dönebilir.
+                let port = if port == 0 { listen_port as u32 } else { port };
+                self.forwards.lock().unwrap().insert(port, (target_host.clone(), target_port));
+                let info = TunnelInfo {
+                    id,
+                    kind,
+                    listen_host: bind,
+                    listen_port: port as u16,
+                    target_host,
+                    target_port,
+                };
+                Ok(self.add_tunnel(info, None))
+            }
+        }
+    }
+
+    pub async fn stop_tunnel(&self, id: &str) {
+        let t = self.tunnels.lock().unwrap().remove(id);
+        let Some(t) = t else { return };
+        if let Some(task) = t.task {
+            task.abort();
+        }
+        if t.info.kind == TunnelKind::Remote {
+            self.forwards.lock().unwrap().remove(&(t.info.listen_port as u32));
+            let _ = self
+                .handle
+                .cancel_tcpip_forward(t.info.listen_host, t.info.listen_port as u32)
+                .await;
         }
     }
 

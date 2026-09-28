@@ -3,7 +3,7 @@
   import Icon from "./Icon.svelte";
   import ContextMenu, { type MenuItem } from "./ContextMenu.svelte";
   import BackupDialog from "./BackupDialog.svelte";
-  import { api, errText, type Session } from "./api";
+  import { api, errText, kindInfo, type Session } from "./api";
   import { store } from "./tabs.svelte";
 
   let { onEdit }: { onEdit: (s: Session | null, folder?: string | null) => void } = $props();
@@ -92,7 +92,9 @@
         { label: "Bağlan", icon: "bolt", action: () => store.openSession(s) },
         s.kind === "sftp"
           ? { label: "Terminal ile aç (SSH)", icon: "terminal", action: () => store.openSession(s, false) }
-          : { label: "Yalnızca SFTP aç", icon: "folder", action: () => store.openSession(s, true) },
+          : s.kind === "ssh" || !s.kind
+            ? { label: "Yalnızca SFTP aç", icon: "folder", action: () => store.openSession(s, true) }
+            : null,
         { label: "Düzenle", icon: "edit", action: () => onEdit(s) },
         { label: "Çoğalt", icon: "copy", action: () => duplicate(s) },
         { label: "Gruba taşı…", icon: "folder", action: () => setTimeout(() => moveMenu(x, y, s)) },
@@ -206,12 +208,14 @@
     onpointerdown={(e) => onPointerDown(e, s)}
     title="{s.username ? s.username + '@' : ''}{s.host}:{s.port}  (çift tıkla: bağlan, sürükle: gruba taşı)"
   >
-    <span class="ic"><Icon name={s.kind === "sftp" ? "folder" : "server"} size={14} /></span>
+    <span class="ic"><Icon name={kindInfo[s.kind ?? "ssh"].icon} size={14} /></span>
     <span class="text">
       <span class="name">{s.name}</span>
-      <span class="host">{s.username ? s.username + "@" : ""}{s.host}{s.port !== 22 ? ":" + s.port : ""}</span>
+      <span class="host">
+        {#if s.kind === "serial"}{s.host} · {s.baud ?? 115200}{:else}{s.username ? s.username + "@" : ""}{s.host}{s.port !== (s.kind === "telnet" ? 23 : 22) ? ":" + s.port : ""}{/if}
+      </span>
     </span>
-    {#if s.kind === "sftp"}<span class="badge">SFTP</span>{/if}
+    {#if kindInfo[s.kind ?? "ssh"].badge}<span class="badge">{kindInfo[s.kind ?? "ssh"].badge}</span>{/if}
     {#if openCount(s)}<span class="dot" title="Açık oturum"></span>{/if}
     {#if s.hasSecret}<span class="key" title="Parola kayıtlı"><Icon name="key" size={12} /></span>{/if}
   </button>

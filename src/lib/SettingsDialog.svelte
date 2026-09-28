@@ -100,6 +100,33 @@
     </section>
 
     <section>
+      <h3>Dosyalar (SFTP)</h3>
+      <div class="grid">
+        <label>
+          <span>Uzak dosyaya çift tıklayınca</span>
+          <select value={s.openFilesWith} onchange={(e) => settings.update({ openFilesWith: e.currentTarget.value as typeof s.openFilesWith })}>
+            <option value="internal">Liman'ın editöründe aç</option>
+            <option value="external">Bilgisayardaki editörde aç</option>
+          </select>
+        </label>
+        <label>
+          <span>Editör uygulaması</span>
+          <input
+            value={s.externalEditor}
+            placeholder="Sistem varsayılanı"
+            spellcheck="false"
+            onchange={(e) => settings.update({ externalEditor: e.currentTarget.value })}
+          />
+        </label>
+      </div>
+      <p class="hint">
+        Editörde kaydettiğiniz her değişiklik sunucuya otomatik yüklenir. Uygulama adı örneği:
+        <code>Visual Studio Code</code>, <code>TextEdit</code>, <code>notepad</code>, <code>gedit</code>.
+      </p>
+      <label class="check"><input type="checkbox" checked={s.sftpDual} onchange={(e) => settings.update({ sftpDual: e.currentTarget.checked })} /> Yalnızca-SFTP sekmesinde yerel dosyaları da göster (çift panel)</label>
+    </section>
+
+    <section>
       <h3>Oturum kaydı</h3>
       <label class="check">
         <input type="checkbox" checked={s.sessionLog} onchange={(e) => settings.update({ sessionLog: e.currentTarget.checked })} />

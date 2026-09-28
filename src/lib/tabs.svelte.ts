@@ -5,7 +5,8 @@ export type TabStatus = "connecting" | "open" | "closed" | "error";
 /** Tek bir terminal (yerel kabuk, SSH kabuğu ya da yalnızca SFTP). */
 export interface Pane {
   key: string;
-  kind: "local" | "ssh" | "sftp";
+  /** telnet: connect.host/port; serial: connect.host = aygıt, connect.port = baud. */
+  kind: "local" | "ssh" | "sftp" | "telnet" | "serial";
   title: string;
   status: TabStatus;
   termId: string | null;
@@ -202,10 +203,10 @@ class Store {
     this.addView(this.localPane(shell));
   }
 
-  private sshPane(connect: ConnectRequest, title: string, session?: Session): Pane {
+  private sshPane(connect: ConnectRequest, title: string, session?: Session, kind?: Pane["kind"]): Pane {
     return {
       key: nextKey("pane"),
-      kind: connect.sftpOnly ? "sftp" : "ssh",
+      kind: kind ?? (connect.sftpOnly ? "sftp" : "ssh"),
       title,
       status: "connecting",
       termId: null,
@@ -215,12 +216,16 @@ class Store {
     };
   }
 
-  openSsh(connect: ConnectRequest, title: string, session?: Session) {
-    this.addView(this.sshPane(connect, title, session));
+  openSsh(connect: ConnectRequest, title: string, session?: Session, kind?: Pane["kind"]) {
+    this.addView(this.sshPane(connect, title, session, kind));
   }
 
   /** `sftpOnly` verilmezse oturumun kendi türü kullanılır. */
   openSession(s: Session, sftpOnly = s.kind === "sftp") {
+    if (s.kind === "telnet" || s.kind === "serial") {
+      const port = s.kind === "serial" ? (s.baud ?? 115200) : s.port;
+      return this.openSsh({ sessionId: s.id, host: s.host, port, username: "", auth: "auto" }, s.name || s.host, s, s.kind);
+    }
     this.openSsh(
       {
         sessionId: s.id,
@@ -241,6 +246,7 @@ class Store {
   private clonePane(p: Pane, share: boolean): Pane {
     if (p.kind === "local") return this.localPane(p.shell ?? null);
     const s = this.sessions.find((x) => x.id === p.sessionId);
+    if (p.kind === "telnet" || p.kind === "serial") return this.sshPane({ ...p.connect! }, p.title, s, p.kind);
     // Bölmede SFTP panosundan da terminal açılır; aynı bağlantı paylaşılır.
     const pane = this.sshPane({ ...p.connect!, sftpOnly: share ? false : p.connect!.sftpOnly }, p.title, s);
     if (share && p.termId && p.status === "open") pane.shareFrom = p.termId;

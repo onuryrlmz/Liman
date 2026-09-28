@@ -1,7 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import Modal from "./Modal.svelte";
-  import { api, errText, type Session } from "./api";
+  import { api, errText, type Session, type SessionKind } from "./api";
   import { store } from "./tabs.svelte";
 
   let {
@@ -22,6 +22,33 @@
 
   const folders = $derived(store.groups);
 
+  const isSsh = $derived(form.kind === "ssh" || form.kind === "sftp" || !form.kind);
+  const kinds: { key: SessionKind; title: string; desc: string }[] = [
+    { key: "ssh", title: "SSH", desc: "Terminal + yanda SFTP" },
+    { key: "sftp", title: "Yalnızca SFTP", desc: "Dosya tarayıcısı" },
+    { key: "telnet", title: "Telnet", desc: "Ağ cihazları, eski sistemler" },
+    { key: "serial", title: "Seri port", desc: "USB-seri, konsol kablosu" },
+  ];
+  const bauds = [300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+  function setKind(k: SessionKind) {
+    const wasTelnet = form.kind === "telnet";
+    form.kind = k;
+    // Varsayılan portu türe göre ayarla (kullanıcı değiştirmediyse).
+    if (k === "telnet" && form.port === 22) form.port = 23;
+    if ((k === "ssh" || k === "sftp") && wasTelnet && form.port === 23) form.port = 22;
+    if (k === "serial") {
+      form.baud ??= 115200;
+      loadPorts();
+    }
+  }
+
+  let ports = $state<{ path: string; description: string }[]>([]);
+  async function loadPorts() {
+    ports = await api.serialPorts().catch(() => []);
+  }
+  if (initial.kind === "serial") loadPorts();
+
   // Atlama sunucusu: kayıtlı bir oturum ya da elle yazılan "kullanıcı@sunucu:port".
   const jumpCandidates = $derived(store.sessions.filter((s) => s.id !== form.id && s.kind !== "sftp"));
   let jumpMode = $state<string>(
@@ -37,7 +64,7 @@
   async function save(connect: boolean) {
     error = "";
     if (!form.host.trim()) {
-      error = "Sunucu adresi gerekli.";
+      error = form.kind === "serial" ? "Seri port aygıtı seçin." : "Sunucu adresi gerekli.";
       return;
     }
     busy = true;
@@ -51,7 +78,8 @@
           folder: form.folder?.trim() || null,
           keyPath: form.keyPath?.trim() || null,
           port: Number(form.port) || 22,
-          jump: jumpMode === "custom" ? jumpCustom.trim() || null : jumpMode || null,
+          jump: !isSsh ? null : jumpMode === "custom" ? jumpCustom.trim() || null : jumpMode || null,
+          baud: form.kind === "serial" ? Number(form.baud) || 115200 : null,
         },
         forget ? "" : secret ? secret : null,
       );
@@ -66,7 +94,7 @@
   }
 </script>
 
-<Modal title={session ? "Oturumu düzenle" : "Yeni oturum"} {onClose}>
+<Modal title={session ? "Oturumu düzenle" : "Yeni oturum"} width={560} {onClose}>
   <form
     class="grid"
     onsubmit={(e) => {
@@ -75,24 +103,49 @@
     }}
   >
     <div class="kind full" role="radiogroup" aria-label="Bağlantı türü">
-      <button type="button" role="radio" aria-checked={form.kind !== "sftp"} class:on={form.kind !== "sftp"} onclick={() => (form.kind = "ssh")}>
-        <strong>SSH</strong>
-        <span>Terminal + yanda SFTP paneli</span>
-      </button>
-      <button type="button" role="radio" aria-checked={form.kind === "sftp"} class:on={form.kind === "sftp"} onclick={() => (form.kind = "sftp")}>
-        <strong>Yalnızca SFTP</strong>
-        <span>Terminal açmadan dosya tarayıcısı</span>
-      </button>
+      {#each kinds as k}
+        <button
+          type="button"
+          role="radio"
+          aria-checked={(form.kind ?? "ssh") === k.key}
+          class:on={(form.kind ?? "ssh") === k.key}
+          onclick={() => setKind(k.key)}
+        >
+          <strong>{k.title}</strong>
+          <span>{k.desc}</span>
+        </button>
+      {/each}
     </div>
-    <label class="wide">
-      <span>Sunucu</span>
-      <!-- svelte-ignore a11y_autofocus -->
-      <input bind:value={form.host} placeholder="ornek.com veya 192.168.1.10" autofocus spellcheck="false" />
-    </label>
-    <label class="narrow">
-      <span>Port</span>
-      <input type="number" min="1" max="65535" bind:value={form.port} />
-    </label>
+    {#if form.kind === "serial"}
+      <label class="wide">
+        <span>Aygıt</span>
+        <div class="row">
+          <input bind:value={form.host} list="serial-ports" placeholder={navigator.platform.startsWith("Win") ? "COM3" : "/dev/ttyUSB0"} spellcheck="false" />
+          <button type="button" class="btn" title="Aygıtları yeniden tara" onclick={loadPorts}>Tara</button>
+        </div>
+        <datalist id="serial-ports">
+          {#each ports as p}<option value={p.path}>{p.description}</option>{/each}
+        </datalist>
+        <small>{ports.length ? `${ports.length} aygıt bulundu — listeden seçebilirsiniz` : "Aygıt bulunamadı; kabloyu takıp Tara'ya basın"}</small>
+      </label>
+      <label class="narrow">
+        <span>Baud</span>
+        <select bind:value={form.baud}>
+          {#each bauds as b}<option value={b}>{b}</option>{/each}
+        </select>
+      </label>
+    {:else}
+      <label class="wide">
+        <span>Sunucu</span>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input bind:value={form.host} placeholder="ornek.com veya 192.168.1.10" autofocus spellcheck="false" />
+      </label>
+      <label class="narrow">
+        <span>Port</span>
+        <input type="number" min="1" max="65535" bind:value={form.port} />
+      </label>
+    {/if}
+    {#if isSsh}
     <label class="full">
       <span>Kullanıcı adı</span>
       <input bind:value={form.username} placeholder="boş bırakılırsa bağlanırken sorulur" spellcheck="false" />
@@ -129,6 +182,7 @@
         <input type="checkbox" bind:checked={forget} /> Kayıtlı parolayı sil
       </label>
     {/if}
+    {/if}
     <label>
       <span>Görünen ad</span>
       <input bind:value={form.name} placeholder="isteğe bağlı" />
@@ -140,6 +194,7 @@
         {#each folders as f}<option value={f}></option>{/each}
       </datalist>
     </label>
+    {#if isSsh}
     <label class="full">
       <span>Atlama sunucusu (ProxyJump)</span>
       <select bind:value={jumpMode}>
@@ -156,6 +211,7 @@
         <input bind:value={jumpCustom} placeholder="ops@bastion.example.com:22  (zincir için virgülle ayırın)" spellcheck="false" />
         <small>Bu sunucuya ssh-agent ya da ~/.ssh anahtarlarıyla bağlanılır. Parola gerekiyorsa onu ayrı bir oturum olarak kaydedip listeden seçin.</small>
       </label>
+    {/if}
     {/if}
     {#if error}<p class="err full">{error}</p>{/if}
     <button type="submit" hidden aria-hidden="true"></button>
@@ -185,7 +241,7 @@
   }
   .kind {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(4, 1fr);
     gap: 8px;
   }
   .kind button {

@@ -1,10 +1,13 @@
 mod backup;
 mod importers;
 mod local;
+mod raw;
+mod localfs;
 mod logger;
 mod sftp;
 mod ssh;
 mod store;
+mod sync;
 
 use std::{collections::HashMap, fmt::Display, path::PathBuf, sync::Arc, sync::Mutex};
 
@@ -17,6 +20,8 @@ use tauri::{
 enum Term {
     Local(local::LocalTerm),
     Ssh(ssh::SshTerm),
+    /// Telnet ve seri port.
+    Raw(raw::RawTerm),
 }
 
 #[derive(Default)]
@@ -30,7 +35,7 @@ impl AppState {
     fn conn(&self, id: &str) -> Result<Arc<ssh::SshConn>, String> {
         match self.terms.lock().unwrap().get(id) {
             Some(Term::Ssh(t)) => Ok(t.conn.clone()),
-            Some(Term::Local(_)) => Err("Bu sekme bir SSH oturumu değil".into()),
+            Some(_) => Err("Bu sekme bir SSH oturumu değil".into()),
             None => Err("Oturum bulunamadı".into()),
         }
     }
@@ -242,6 +247,47 @@ async fn ssh_connect(
     Ok(id)
 }
 
+#[tauri::command]
+async fn telnet_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    cols: u16,
+    rows: u16,
+    on_data: Channel<InvokeResponseBody>,
+    log_name: Option<String>,
+) -> CmdResult<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let out = sink(on_data, log_name.as_deref());
+    let term = raw::telnet(host.trim(), port, cols, rows, out, on_exit(app, id.clone()))
+        .await
+        .map_err(err)?;
+    state.terms.lock().unwrap().insert(id.clone(), Term::Raw(term));
+    Ok(id)
+}
+
+#[tauri::command]
+fn serial_ports() -> Vec<raw::SerialPortDesc> {
+    raw::serial_ports()
+}
+
+#[tauri::command]
+fn serial_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    baud: u32,
+    on_data: Channel<InvokeResponseBody>,
+    log_name: Option<String>,
+) -> CmdResult<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let out = sink(on_data, log_name.as_deref());
+    let term = raw::serial(&path, baud, out, on_exit(app, id.clone())).map_err(err)?;
+    state.terms.lock().unwrap().insert(id.clone(), Term::Raw(term));
+    Ok(id)
+}
+
 /// Açık bir SSH bağlantısı üzerinde yeni bir kabuk açar (bölünmüş pano).
 #[tauri::command]
 async fn ssh_share(
@@ -271,6 +317,7 @@ fn term_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult
     match state.terms.lock().unwrap().get_mut(&id) {
         Some(Term::Local(t)) => t.write(data.as_bytes()).map_err(err),
         Some(Term::Ssh(t)) => t.send(ssh::SshInput::Data(data.into_bytes())).map_err(err),
+        Some(Term::Raw(t)) => t.send(raw::RawInput::Data(data.into_bytes())).map_err(err),
         None => Ok(()),
     }
 }
@@ -281,6 +328,10 @@ fn term_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> 
         Some(Term::Local(t)) => t.resize(cols, rows).map_err(err),
         Some(Term::Ssh(t)) => {
             let _ = t.send(ssh::SshInput::Resize(cols as u32, rows as u32));
+            Ok(())
+        }
+        Some(Term::Raw(t)) => {
+            let _ = t.send(raw::RawInput::Resize(cols, rows));
             Ok(())
         }
         None => Ok(()),
@@ -304,6 +355,9 @@ async fn term_close(state: State<'_, AppState>, id: String) -> CmdResult<()> {
             if !shared {
                 t.conn.disconnect().await;
             }
+        }
+        Some(Term::Raw(t)) => {
+            let _ = t.send(raw::RawInput::Close);
         }
         None => {}
     }
@@ -365,6 +419,26 @@ async fn sessions_export(
     .await
     .map_err(err)?
     .map_err(err)
+}
+
+#[tauri::command]
+fn local_list(path: String) -> CmdResult<localfs::Listing> {
+    localfs::list(&path).map_err(err)
+}
+
+#[tauri::command]
+fn local_mkdir(parent: String, name: String) -> CmdResult<()> {
+    localfs::mkdir(&parent, &name).map_err(err)
+}
+
+#[tauri::command]
+fn local_rename(path: String, name: String) -> CmdResult<()> {
+    localfs::rename(&path, &name).map_err(err)
+}
+
+#[tauri::command]
+fn local_remove(path: String) -> CmdResult<()> {
+    localfs::remove(&path).map_err(err)
 }
 
 #[tauri::command]
@@ -485,6 +559,82 @@ async fn sftp_write_text(
     sftp::write_text(s, &path, &text).await.map_err(err)
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct EditSync {
+    remote: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+/// Uzak dosyayı yerel editörde açmak için indirir ve kaydedildikçe geri yükler.
+#[tauri::command]
+async fn sftp_edit_local(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    remote: String,
+) -> CmdResult<String> {
+    let conn = state.conn(&id)?;
+    let local = {
+        let s = conn.sftp().await.map_err(err)?;
+        sftp::fetch_for_edit(s, &remote).await.map_err(err)?
+    };
+    let path = local.to_string_lossy().into_owned();
+    let weak = Arc::downgrade(&conn);
+    tauri::async_runtime::spawn(async move {
+        let r = remote.clone();
+        sftp::sync_edits(weak, local, remote, move |res| {
+            let _ = app.emit(
+                "edit-sync",
+                EditSync {
+                    remote: r.clone(),
+                    ok: res.is_ok(),
+                    error: res.err().map(err),
+                },
+            );
+        })
+        .await;
+    });
+    Ok(path)
+}
+
+#[tauri::command]
+async fn sync_compare(
+    state: State<'_, AppState>,
+    id: String,
+    local: String,
+    remote: String,
+) -> CmdResult<sync::Comparison> {
+    let conn = state.conn(&id)?;
+    let s = conn.sftp().await.map_err(err)?;
+    sync::compare(s, std::path::Path::new(&local), &remote).await.map_err(err)
+}
+
+/// Seçilen farkları sırayla aktarır; her dosya ayrı bir aktarım satırı olarak görünür.
+#[tauri::command]
+async fn sync_apply(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    local: String,
+    remote: String,
+    actions: Vec<sync::Action>,
+) -> CmdResult<usize> {
+    let conn = state.conn(&id)?;
+    let s = conn.sftp().await.map_err(err)?;
+    let root = PathBuf::from(local);
+    let mut failed = 0;
+    for a in &actions {
+        let name = a.path.rsplit('/').next().unwrap_or(&a.path).to_string();
+        let mut rep = reporter(app.clone(), uuid::Uuid::new_v4().to_string(), name);
+        let res = sync::apply_one(s, &root, &remote, a, &mut rep).await;
+        failed += res.is_err() as usize;
+        rep.finish(&res);
+    }
+    Ok(failed)
+}
+
 #[tauri::command]
 async fn sftp_download(
     app: AppHandle,
@@ -533,19 +683,22 @@ async fn sftp_upload(
 async fn tunnel_start(
     state: State<'_, AppState>,
     id: String,
-    local_port: u16,
-    remote_host: String,
-    remote_port: u16,
+    kind: ssh::TunnelKind,
+    listen_host: String,
+    listen_port: u16,
+    target_host: String,
+    target_port: u16,
 ) -> CmdResult<ssh::TunnelInfo> {
     let conn = state.conn(&id)?;
-    conn.start_tunnel(local_port, remote_host, remote_port)
+    conn.start_tunnel(kind, listen_host, listen_port, target_host, target_port)
         .await
         .map_err(err)
 }
 
 #[tauri::command]
-fn tunnel_stop(state: State<'_, AppState>, id: String, tunnel_id: String) -> CmdResult<()> {
-    state.conn(&id)?.stop_tunnel(&tunnel_id);
+async fn tunnel_stop(state: State<'_, AppState>, id: String, tunnel_id: String) -> CmdResult<()> {
+    let conn = state.conn(&id)?;
+    conn.stop_tunnel(&tunnel_id).await;
     Ok(())
 }
 
@@ -569,6 +722,9 @@ pub fn run() {
             ssh_connect,
             host_key_answer,
             ssh_share,
+            telnet_connect,
+            serial_ports,
+            serial_connect,
             term_write,
             term_resize,
             term_close,
@@ -587,6 +743,10 @@ pub fn run() {
             settings_get,
             snippets_list,
             log_default_dir,
+            local_list,
+            local_mkdir,
+            local_rename,
+            local_remove,
             snippets_save,
             settings_set,
             import_sessions,
@@ -598,6 +758,9 @@ pub fn run() {
             sftp_read_text,
             sftp_write_text,
             sftp_download,
+            sftp_edit_local,
+            sync_compare,
+            sync_apply,
             sftp_upload,
             tunnel_start,
             tunnel_stop,

@@ -9,9 +9,17 @@
   import EditorDialog from "./EditorDialog.svelte";
   import { api, errText, formatDate, formatSize, joinPath, parentPath, type Entry } from "./api";
   import { store } from "./tabs.svelte";
+  import { settings } from "./settings.svelte";
+  import { openPath } from "@tauri-apps/plugin-opener";
+  import { fileDrag } from "./file-drag.svelte";
 
   /** wide: ana alanda tam ekran (yalnızca SFTP sekmesi); tarih ve izin sütunları da görünür. */
-  let { termId, wide = false }: { termId: string; wide?: boolean } = $props();
+  /** localDir: çift panelde yerel klasör; indirmeler oraya gider ve sürükle-bırak açılır. */
+  let {
+    termId,
+    wide = false,
+    localDir = null,
+  }: { termId: string; wide?: boolean; localDir?: string | null } = $props();
 
   let path = $state(store.sftpPaths[termId] ?? "");
   let pathInput = $state("");
@@ -79,6 +87,31 @@
 
   onDestroy(() => unlistenDrop?.());
 
+  // Çift panel: yerel panelden bırakılanları yükle.
+  $effect(() => {
+    if (localDir === null) return;
+    return fileDrag.zone("remote", (items) => uploadPaths(items.map((e) => e.path)));
+  });
+
+  // Başka yerden (eşitleme, yerel panel) yapılan yüklemeler bitince listeyi tazele.
+  let upDone = 0;
+  $effect(() => {
+    const n = store.transfers.filter((t) => t.state === "done" && t.direction !== "down").length;
+    if (n !== upDone) {
+      upDone = n;
+      if (n && path) load(path);
+    }
+  });
+
+  /** Yerel panelin "→" düğmesi için dışarıdan çağrılır. */
+  export function uploadFromLocal(paths: string[]) {
+    return uploadPaths(paths);
+  }
+
+  export function downloadSelected() {
+    return download(selectedEntries);
+  }
+
   function transferId() {
     return crypto.randomUUID();
   }
@@ -106,9 +139,9 @@
     uploadPaths(Array.isArray(res) ? res : [res]);
   }
 
-  async function download(items: Entry[]) {
+  async function download(items: Entry[], target: string | null = localDir) {
     if (!items.length) return;
-    const dest = await open({ directory: true, title: "İndirilecek klasörü seçin" });
+    const dest = target ?? (await open({ directory: true, title: "İndirilecek klasörü seçin" }));
     if (typeof dest !== "string") return;
     for (const e of items) {
       const id = transferId();
@@ -168,7 +201,20 @@
 
   function activate(e: Entry) {
     if (e.isDir) load(e.path);
+    else if (settings.value.openFilesWith === "external") editLocal(e);
     else editing = e.path;
+  }
+
+  /** Dosyayı bilgisayardaki editörde açar; kaydedildikçe sunucuya yüklenir. */
+  async function editLocal(e: Entry) {
+    try {
+      const local = await api.sftpEditLocal(termId, e.path);
+      const app = settings.value.externalEditor.trim() || undefined;
+      await openPath(local, app);
+      store.notify(`${e.name} açıldı; kaydettikçe sunucuya yüklenecek`);
+    } catch (err) {
+      store.notify(errText(err), "error");
+    }
   }
 
   let lastClicked: string | null = null;
@@ -195,7 +241,12 @@
     const single = items.length === 1 ? items[0] : null;
     const fileItems: (MenuItem | null)[] = [];
     if (single?.isDir) fileItems.push({ label: "Aç", icon: "folder", action: () => load(single.path) });
-    if (single && !single.isDir) fileItems.push({ label: "Düzenle", icon: "edit", action: () => (editing = single.path) });
+    if (single && !single.isDir) {
+      fileItems.push(
+        { label: "Liman'da düzenle", icon: "edit", action: () => (editing = single.path) },
+        { label: "Bilgisayardaki editörde aç", icon: "file", action: () => editLocal(single) },
+      );
+    }
     fileItems.push(
       { label: "İndir…", icon: "download", action: () => download(items) },
       null,
@@ -229,7 +280,13 @@
   }
 </script>
 
-<div class="sftp" class:dropping class:wide bind:this={panel}>
+<div
+  class="sftp"
+  class:dropping={dropping || fileDrag.drag?.over === "remote"}
+  class:wide
+  bind:this={panel}
+  data-file-drop={localDir !== null ? "remote" : undefined}
+>
   <div class="toolbar">
     <button class="icon-btn" title="Üst klasör" onclick={() => load(parentPath(path))}><Icon name="up" /></button>
     <button class="icon-btn" title="Ev klasörü" onclick={async () => load(await api.sftpHome(termId))}><Icon name="home" /></button>
@@ -296,6 +353,11 @@
         aria-selected={selected.has(e.path)}
         tabindex="-1"
         onclick={(ev) => click(ev, e)}
+        onpointerdown={(ev) => {
+          if (localDir === null || renaming) return;
+          if (!selected.has(e.path) && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey) selected = new Set([e.path]);
+          fileDrag.start(ev, "remote", () => selectedEntries);
+        }}
         ondblclick={() => activate(e)}
         oncontextmenu={(ev) => {
           ev.stopPropagation();
@@ -331,7 +393,7 @@
       {#if !loading && !error}<p class="empty">Klasör boş</p>{/if}
     {/each}
   </div>
-  {#if dropping}
+  {#if dropping || fileDrag.drag?.over === "remote"}
     <div class="drop-hint"><Icon name="upload" size={22} /> {path} klasörüne yükle</div>
   {/if}
 </div>

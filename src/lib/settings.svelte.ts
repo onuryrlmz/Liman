@@ -156,6 +156,12 @@ export interface Settings {
   sessionLog: boolean;
   logDir: string;
   logTimestamps: boolean;
+  /** Yalnızca-SFTP sekmesinde solda yerel dosyalar. */
+  sftpDual: boolean;
+  /** Çift tıklanan uzak dosya: Liman'ın editörü ya da bilgisayardaki uygulama. */
+  openFilesWith: "internal" | "external";
+  /** Yerel editör uygulaması (boşsa sistemin varsayılanı), örn. "Visual Studio Code". */
+  externalEditor: string;
 }
 
 export const defaults: Settings = {
@@ -173,6 +179,9 @@ export const defaults: Settings = {
   sessionLog: false,
   logDir: "",
   logTimestamps: true,
+  sftpDual: true,
+  openFilesWith: "internal",
+  externalEditor: "",
 };
 
 export const MIN_FONT = 8;

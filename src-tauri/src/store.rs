@@ -28,6 +28,9 @@ pub enum SessionKind {
     Ssh,
     /// Kabuk açmadan yalnızca dosya tarayıcısı.
     Sftp,
+    Telnet,
+    /// Seri port; aygıt yolu `host` alanında.
+    Serial,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -54,6 +57,12 @@ pub struct Session {
     /// Atlama sunucusu: kayıtlı bir oturumun kimliği ya da "kullanıcı@sunucu:port".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
+    /// Seri port oturumunda baud hızı (aygıt yolu `host` alanındadır).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baud: Option<u32>,
+    /// Bağlanınca otomatik başlatılan tüneller (içeriği arayüz belirler).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tunnels: Vec<serde_json::Value>,
 }
 
 fn default_port() -> u16 {

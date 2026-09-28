@@ -11,6 +11,7 @@
   import Icon from "./Icon.svelte";
   import { api, errText, AUTH_FAILED, HOST_KEY_REJECTED, type ConnectRequest } from "./api";
   import { settings } from "./settings.svelte";
+  import { describeTunnel } from "./TunnelDialog.svelte";
   import { store, type Tab, type TabPatch } from "./tabs.svelte";
 
   let {
@@ -90,6 +91,15 @@
     try {
       if (tab.kind === "local") {
         termId = await api.localSpawn(tab.shell ?? null, cols, rows, write, tab.title);
+      } else if (tab.kind === "telnet") {
+        const { host, port } = tab.connect!;
+        info(`Telnet: ${host}:${port} adresine bağlanılıyor...`);
+        termId = await api.telnetConnect(host, port, cols, rows, write, tab.title);
+      } else if (tab.kind === "serial") {
+        const { host: path, port: baud } = tab.connect!;
+        info(`Seri port: ${path} (${baud} baud, 8N1) açılıyor...`);
+        termId = await api.serialConnect(path, baud, write, tab.title);
+        info("Açıldı. Aygıt sessizse Enter'a basmayı deneyin.");
       } else if (tab.shareFrom && (await shareConnection(cols, rows))) {
         // Bölünmüş pano: açık bağlantı üzerinde yeni kabuk açıldı.
       } else {
@@ -127,6 +137,7 @@
           }
         }
         lastReq = { ...req, saveSecret: false };
+        await startSavedTunnels();
       }
       reconnectAttempt = 0;
       onUpdate({ status: "open", termId });
@@ -158,6 +169,19 @@
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /** Oturuma kayıtlı tünelleri yeni bağlantıda başlatır (yeniden bağlanınca da). */
+  async function startSavedTunnels() {
+    const session = tab.sessionId ? store.sessions.find((s) => s.id === tab.sessionId) : undefined;
+    for (const t of session?.tunnels ?? []) {
+      try {
+        const info = await api.tunnelStart(termId!, t);
+        term.write(`\x1b[90mTünel açıldı: ${describeTunnel(info)}\x1b[0m\r\n`);
+      } catch (e) {
+        error(`Tünel açılamadı (${describeTunnel(t)}): ${errText(e)}`);
+      }
     }
   }
 

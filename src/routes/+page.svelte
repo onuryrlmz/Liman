@@ -10,12 +10,14 @@
   import HostKeyDialog from "$lib/HostKeyDialog.svelte";
   import SettingsDialog from "$lib/SettingsDialog.svelte";
   import SnippetList from "$lib/SnippetList.svelte";
+  import LocalPanel from "$lib/LocalPanel.svelte";
+  import { fileDrag } from "$lib/file-drag.svelte";
   import Palette, { type PaletteItem } from "$lib/Palette.svelte";
   import { settings } from "$lib/settings.svelte";
   import { updater } from "$lib/update-store.svelte";
   import ContextMenu, { type MenuItem } from "$lib/ContextMenu.svelte";
   import Icon from "$lib/Icon.svelte";
-  import { api, formatSize, parseQuick, type Session, type Transfer } from "$lib/api";
+  import { api, formatSize, parseQuick, kindInfo, type Session, type Transfer } from "$lib/api";
   import { store, computeLayout, leaves, type Tab, type View, type Rect, type SplitDir } from "$lib/tabs.svelte";
 
   const isMac = navigator.platform.toLowerCase().includes("mac");
@@ -23,6 +25,8 @@
 
   let sidebarTab = $state<"sessions" | "sftp" | "snippets">("sessions");
   let paletteOpen = $state(false);
+  /** Çift panelli SFTP: yalnızca-SFTP panosu başına yerel klasör. */
+  let localPaths = $state<Record<string, string>>({});
   let sidebarOpen = $state(true);
   let sidebarWidth = $state(loadWidth());
   let editing = $state<{ session: Session | null; folder?: string | null } | null>(null);
@@ -64,8 +68,14 @@
       store.shells = s;
     });
     const un = listen<Transfer>("transfer", (e) => store.upsertTransfer(e.payload));
+    const unEdit = listen<{ remote: string; ok: boolean; error: string | null }>("edit-sync", (e) => {
+      const name = e.payload.remote.split("/").pop();
+      if (e.payload.ok) store.notify(`${name} sunucuya kaydedildi`);
+      else store.notify(`${name} yüklenemedi: ${e.payload.error}`, "error");
+    });
     return () => {
       un.then((f) => f());
+      unEdit.then((f) => f());
     };
   });
 
@@ -79,6 +89,8 @@
     store.openSsh(
       { host: q.host, port: q.port, username: q.username, auth: "auto", sftpOnly: q.sftpOnly },
       quick.trim().replace(/^ssh:\/\//i, ""),
+      undefined,
+      q.telnet ? "telnet" : undefined,
     );
     quick = "";
   }
@@ -107,7 +119,7 @@
       { label: "Yeniden bağlan", icon: "refresh", disabled: tab.status === "open" || tab.status === "connecting", action: () => terminals[tab.key]?.restart() },
       { label: "Yeni sekmede çoğalt", icon: "copy", action: () => store.duplicate(tab) },
     ];
-    if (tab.kind !== "local") {
+    if (tab.kind === "ssh" || tab.kind === "sftp") {
       items.push({ label: "Tüneller…", icon: "tunnel", disabled: tab.status !== "open", action: () => (tunnelTab = tab) });
     }
     items.push(null);
@@ -131,8 +143,8 @@
     }
     for (const se of store.sessions) {
       items.push({
-        kind: se.kind === "sftp" ? "SFTP" : "Bağlan",
-        icon: se.kind === "sftp" ? "folder" : "server",
+        kind: kindInfo[se.kind ?? "ssh"].badge ?? "Bağlan",
+        icon: kindInfo[se.kind ?? "ssh"].icon,
         label: se.name,
         detail: `${se.username ? se.username + "@" : ""}${se.host}${se.folder ? " · " + se.folder : ""}`,
         action: () => store.openSession(se),
@@ -260,6 +272,8 @@
     if (!t) return "Hazır";
     const st = { connecting: "bağlanıyor…", open: "bağlı", closed: "kapandı", error: "hata" }[t.status];
     if (t.kind === "local") return `Yerel • ${t.shell ?? "varsayılan kabuk"} • ${st}`;
+    if (t.kind === "serial") return `Seri port • ${t.connect!.host} • ${t.connect!.port} baud • ${st}`;
+    if (t.kind === "telnet") return `Telnet • ${t.connect!.host}:${t.connect!.port} • ${st}`;
     const c = t.connect!;
     return `${t.kind === "sftp" ? "SFTP" : "SSH"} • ${c.username ? c.username + "@" : ""}${c.host}:${c.port} • ${st}`;
   }
@@ -283,7 +297,7 @@
     </div>
     <button
       class="tool"
-      disabled={!active || active.kind === "local" || active.status !== "open"}
+      disabled={!active || (active.kind !== "ssh" && active.kind !== "sftp") || active.status !== "open"}
       onclick={() => (tunnelTab = active)}
       title="Aktif SSH oturumu için port yönlendirme"
     >
@@ -404,7 +418,7 @@
               title={describe(tab)}
             >
               <span class="st {tab.status}"></span>
-              <Icon name={tab.kind === "ssh" ? "server" : tab.kind === "sftp" ? "folder" : "terminal"} size={13} />
+              <Icon name={tab.kind === "local" ? "terminal" : kindInfo[tab.kind].icon} size={13} />
               <span class="title">{tab.title}</span>
               {#if count > 1}<span class="count" title="{count} pano">{count}</span>{/if}
               <button
@@ -448,10 +462,20 @@
             <!-- Yalnızca SFTP: bağlıyken terminalin yerine tam ekran dosya tarayıcısı.
                  Bağlantı koparsa terminal (günlük ve "R ile yeniden bağlan") yeniden görünür. -->
             {#if tab.kind === "sftp" && tab.status === "open" && tab.termId}
-              <div class="sftp-pane">
+              <div class="sftp-pane" class:dual={settings.value.sftpDual}>
                 {#key tab.termId}
-                  <SftpPanel termId={tab.termId} wide />
+                  {#if settings.value.sftpDual}
+                    <LocalPanel termId={tab.termId} bind:path={() => localPaths[tab.key] ?? "", (v) => (localPaths[tab.key] = v)} />
+                  {/if}
+                  <SftpPanel termId={tab.termId} wide localDir={settings.value.sftpDual ? (localPaths[tab.key] ?? null) : null} />
                 {/key}
+                <button
+                  class="dual-toggle"
+                  title={settings.value.sftpDual ? "Yerel paneli gizle" : "Yerel paneli göster"}
+                  onclick={() => settings.update({ sftpDual: !settings.value.sftpDual })}
+                >
+                  <Icon name="sidebar" size={14} />
+                </button>
               </div>
             {/if}
           </div>
@@ -555,6 +579,13 @@
   <TunnelDialog tab={tunnelTab} onClose={() => (tunnelTab = null)} />
 {/if}
 <HostKeyDialog />
+{#if fileDrag.drag}
+  <div class="file-ghost" style:left="{fileDrag.drag.x + 14}px" style:top="{fileDrag.drag.y + 10}px">
+    <Icon name={fileDrag.drag.from === "local" ? "upload" : "download"} size={13} />
+    {fileDrag.drag.items.length === 1 ? fileDrag.drag.items[0].name : `${fileDrag.drag.items.length} öğe`}
+    {#if fileDrag.drag.over}<span>→ {fileDrag.drag.over === "local" ? "bu bilgisayar" : "sunucu"}</span>{/if}
+  </div>
+{/if}
 {#if paletteOpen}
   <Palette items={paletteItems()} onClose={() => (paletteOpen = false)} />
 {/if}
@@ -1018,6 +1049,55 @@
     position: absolute;
     inset: 0;
     background: var(--panel);
+  }
+  .sftp-pane.dual {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .sftp-pane.dual > :global(:first-child) {
+    border-right: 1px solid var(--border);
+  }
+  .dual-toggle {
+    position: absolute;
+    left: 50%;
+    bottom: 10px;
+    transform: translateX(-50%);
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 22px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-2);
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .sftp-pane:not(.dual) .dual-toggle {
+    left: auto;
+    right: 12px;
+    transform: none;
+  }
+  .dual-toggle:hover {
+    color: var(--text);
+  }
+  .file-ghost {
+    position: fixed;
+    z-index: 95;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 6px;
+    background: var(--panel-2);
+    border: 1px solid var(--accent);
+    box-shadow: 0 6px 20px rgb(0 0 0 / 0.4);
+    font-size: 12.5px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+  .file-ghost :global(svg),
+  .file-ghost span {
+    color: var(--accent);
   }
   .pane.hidden {
     visibility: hidden;

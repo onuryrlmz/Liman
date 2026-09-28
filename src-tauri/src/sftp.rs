@@ -26,7 +26,7 @@ pub struct Entry {
     pub perms: String,
 }
 
-fn perms_string(mode: Option<u32>) -> String {
+pub fn perms_string(mode: Option<u32>) -> String {
     let Some(m) = mode else { return String::new() };
     let bits = [
         (0o400, 'r'),
@@ -115,10 +115,77 @@ pub async fn read_text(sftp: &SftpSession, path: &str) -> Result<String> {
 }
 
 pub async fn write_text(sftp: &SftpSession, path: &str, text: &str) -> Result<()> {
+    write_bytes(sftp, path, text.as_bytes()).await
+}
+
+pub async fn write_bytes(sftp: &SftpSession, path: &str, data: &[u8]) -> Result<()> {
     let mut f = sftp.create(path).await?;
-    f.write_all(text.as_bytes()).await?;
+    f.write_all(data).await?;
     f.shutdown().await?;
     Ok(())
+}
+
+// ---------- Yerel editörde düzenleme ----------
+
+const EDIT_LIMIT: u64 = 50 * 1024 * 1024;
+
+/// Uzak dosyayı geçici bir klasöre indirir; yerel yolunu döndürür.
+pub async fn fetch_for_edit(sftp: &SftpSession, remote: &str) -> Result<PathBuf> {
+    let meta = sftp.metadata(remote).await?;
+    if meta.file_type().is_dir() {
+        bail!("Klasörler düzenlenemez");
+    }
+    if meta.len() > EDIT_LIMIT {
+        bail!("Dosya düzenlemek için çok büyük (50 MB üstü)");
+    }
+    let data = sftp.read(remote).await?;
+    let name = remote.rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or("dosya");
+    let dir = crate::store::config_dir()
+        .join("edit")
+        .join(uuid::Uuid::new_v4().to_string());
+    tokio::fs::create_dir_all(&dir).await?;
+    let local = dir.join(name);
+    tokio::fs::write(&local, data).await?;
+    Ok(local)
+}
+
+/// Yerel kopya değiştikçe sunucuya yükler. Bağlantı kapanınca (ya da `stop` düşünce) durur
+/// ve geçici klasörü siler. `report(Ok)` her başarılı yüklemede, `report(Err)` hatada çağrılır.
+pub async fn sync_edits(
+    conn: std::sync::Weak<crate::ssh::SshConn>,
+    local: PathBuf,
+    remote: String,
+    report: impl Fn(Result<()>) + Send + 'static,
+) {
+    let stamp = |p: &PathBuf| std::fs::metadata(p).ok().map(|m| (m.modified().ok(), m.len()));
+    let mut last = stamp(&local);
+    loop {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let Some(conn) = conn.upgrade().filter(|c| !c.is_closed()) else {
+            break;
+        };
+        let now = stamp(&local);
+        if now.is_none() || now == last {
+            continue;
+        }
+        // Editör yazmayı bitirsin: boyut/zaman bir süre sabit kalana kadar bekle.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let settled = stamp(&local);
+        if settled != now {
+            continue;
+        }
+        last = settled;
+        let res = async {
+            let data = tokio::fs::read(&local).await?;
+            let s = conn.sftp().await?;
+            write_bytes(s, &remote, &data).await
+        }
+        .await;
+        report(res);
+    }
+    if let Some(dir) = local.parent() {
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
 }
 
 // ---------- Aktarımlar ----------

@@ -216,11 +216,11 @@ async fn ssh_shell_sftp_and_tunnel() {
     });
     let info = term
         .conn
-        .start_tunnel(0, "127.0.0.1".into(), echo_port)
+        .start_tunnel(ssh::TunnelKind::Local, String::new(), 0, "127.0.0.1".into(), echo_port)
         .await
         .unwrap();
     assert_eq!(term.conn.tunnels().len(), 1);
-    let mut c = tokio::net::TcpStream::connect(("127.0.0.1", info.local_port))
+    let mut c = tokio::net::TcpStream::connect(("127.0.0.1", info.listen_port))
         .await
         .unwrap();
     c.write_all(b"tunel-ok").await.unwrap();
@@ -230,7 +230,7 @@ async fn ssh_shell_sftp_and_tunnel() {
         .unwrap()
         .unwrap();
     assert_eq!(&buf, b"tunel-ok");
-    term.conn.stop_tunnel(&info.id);
+    term.conn.stop_tunnel(&info.id).await;
     assert!(term.conn.tunnels().is_empty());
 
     // --- Çıkış ---
@@ -294,6 +294,8 @@ fn session(name: &str, folder: Option<&str>, auth: store::AuthKind) -> store::Se
         has_secret: false,
         kind: store::SessionKind::Ssh,
         jump: None,
+        baud: None,
+        tunnels: vec![],
     }
 }
 
@@ -637,4 +639,323 @@ fn session_log_strips_escape_sequences() {
     assert!(text.starts_with("# Liman oturum kaydı: web/1 prod"));
     assert!(text.ends_with("\nhata\n"), "{text:?}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn local_file_browser() {
+    use crate::localfs;
+    let dir = std::env::temp_dir().join(format!("liman-lfs-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("Zklasör")).unwrap();
+    std::fs::write(dir.join("b.txt"), "12345").unwrap();
+    std::fs::write(dir.join("A.txt"), "").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.join("Zklasör"), dir.join("bağ")).unwrap();
+
+    let l = localfs::list(dir.to_str().unwrap()).unwrap();
+    let names: Vec<_> = l.entries.iter().map(|e| e.name.as_str()).collect();
+    #[cfg(unix)]
+    assert_eq!(names, ["bağ", "Zklasör", "A.txt", "b.txt"], "klasörler önce, harf sırasıyla");
+    let b = l.entries.iter().find(|e| e.name == "b.txt").unwrap();
+    assert_eq!(b.size, 5);
+    assert!(l.parent.is_some());
+    #[cfg(unix)]
+    assert!(l.entries.iter().any(|e| e.name == "bağ" && e.is_link && e.is_dir));
+
+    localfs::mkdir(&l.path, "yeni").unwrap();
+    localfs::rename(&format!("{}/b.txt", l.path), "c.txt").unwrap();
+    assert!(localfs::rename(&format!("{}/c.txt", l.path), "A.txt").is_err(), "var olanın üzerine yazmamalı");
+    localfs::remove(&format!("{}/Zklasör", l.path)).unwrap();
+    let names: Vec<_> = localfs::list(&l.path).unwrap().entries.into_iter().map(|e| e.name).collect();
+    assert!(names.contains(&"yeni".to_string()) && names.contains(&"c.txt".to_string()));
+    assert!(!names.contains(&"Zklasör".to_string()));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn edit_in_local_editor_syncs_back() {
+    let Some(params) = test_params(None) else {
+        return;
+    };
+    let (_out, sink) = Output::new();
+    let (on_exit, _) = exit_signal();
+    let term = ssh::connect(params, 80, 24, sink, accept_all(), on_exit).await.unwrap();
+    let s = term.conn.sftp().await.unwrap();
+    let remote = ssh::remote_join(&s.canonicalize(".").await.unwrap(), &format!("liman-edit-{}.txt", std::process::id()));
+    sftp::write_text(s, &remote, "ilk\n").await.unwrap();
+
+    let local = sftp::fetch_for_edit(s, &remote).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), "ilk\n");
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let r = reports.clone();
+    let task = tokio::spawn(sftp::sync_edits(Arc::downgrade(&term.conn), local.clone(), remote.clone(), move |res| {
+        r.lock().unwrap().push(res.is_ok())
+    }));
+
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(reports.lock().unwrap().is_empty(), "değişiklik yokken yüklememeli");
+    std::fs::write(&local, "düzenlendi ş\n").unwrap();
+    for _ in 0..50 {
+        if !reports.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(*reports.lock().unwrap(), vec![true]);
+    assert_eq!(sftp::read_text(s, &remote).await.unwrap(), "düzenlendi ş\n");
+
+    // Bağlantı kapanınca izleme durur ve geçici klasör silinir.
+    s.remove_file(remote).await.unwrap();
+    term.conn.disconnect().await;
+    drop(term);
+    tokio::time::timeout(Duration::from_secs(5), task).await.expect("izleme durmadı").unwrap();
+    assert!(!local.parent().unwrap().exists());
+}
+
+#[tokio::test]
+async fn folder_compare_and_sync() {
+    use crate::sync::{self, Action, Direction, Status};
+    let Some(params) = test_params(None) else {
+        return;
+    };
+    let (_out, sink) = Output::new();
+    let (on_exit, _) = exit_signal();
+    let term = ssh::connect(params, 80, 24, sink, accept_all(), on_exit).await.unwrap();
+    let s = term.conn.sftp().await.unwrap();
+    let remote = ssh::remote_join(&s.canonicalize(".").await.unwrap(), &format!("liman-sync-{}", std::process::id()));
+    let local = std::env::temp_dir().join(format!("liman-sync-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(local.join("alt/derin")).unwrap();
+    std::fs::write(local.join("yalniz-yerel.txt"), "y").unwrap();
+    std::fs::write(local.join("alt/derin/ortak.txt"), "yerel").unwrap();
+    s.create_dir(remote.clone()).await.unwrap();
+    s.create_dir(format!("{remote}/alt")).await.unwrap();
+    sftp::write_text(s, &format!("{remote}/yalniz-uzak.txt"), "u").await.unwrap();
+
+    let dummy = |_: sftp::Progress| {};
+    let c = sync::compare(s, &local, &remote).await.unwrap();
+    let st = |p: &str| c.diffs.iter().find(|d| d.path == p).map(|d| d.status);
+    assert_eq!(st("yalniz-yerel.txt"), Some(Status::OnlyLocal));
+    assert_eq!(st("alt/derin/ortak.txt"), Some(Status::OnlyLocal));
+    assert_eq!(st("yalniz-uzak.txt"), Some(Status::OnlyRemote));
+    assert!(!c.truncated);
+
+    for a in [
+        Action { path: "alt/derin/ortak.txt".into(), direction: Direction::Upload },
+        Action { path: "yalniz-yerel.txt".into(), direction: Direction::Upload },
+        Action { path: "yalniz-uzak.txt".into(), direction: Direction::Download },
+    ] {
+        let mut rep = sftp::Reporter::new("x".into(), "x".into(), dummy);
+        sync::apply_one(s, &local, &remote, &a, &mut rep).await.unwrap();
+    }
+    // Zamanlar korunduğu için eşitlemeden sonra fark kalmamalı.
+    let c = sync::compare(s, &local, &remote).await.unwrap();
+    assert!(c.diffs.is_empty(), "{:?}", c.diffs);
+    assert_eq!(c.same, 3);
+    assert_eq!(sftp::read_text(s, &format!("{remote}/alt/derin/ortak.txt")).await.unwrap(), "yerel");
+    assert_eq!(std::fs::read_to_string(local.join("yalniz-uzak.txt")).unwrap(), "u");
+
+    // Yerel dosya değişince "yerel daha yeni" görünür.
+    std::fs::write(local.join("yalniz-yerel.txt"), "degisti").unwrap();
+    let f = std::fs::File::options().write(true).open(local.join("yalniz-yerel.txt")).unwrap();
+    f.set_modified(std::time::SystemTime::now() + Duration::from_secs(60)).unwrap();
+    let c = sync::compare(s, &local, &remote).await.unwrap();
+    assert_eq!(c.diffs.len(), 1);
+    assert_eq!(c.diffs[0].status, Status::LocalNewer);
+
+    // Kökten çıkmaya çalışan yol reddedilir.
+    let mut rep = sftp::Reporter::new("x".into(), "x".into(), dummy);
+    let bad = Action { path: "../kacak.txt".into(), direction: Direction::Download };
+    assert!(sync::apply_one(s, &local, &remote, &bad, &mut rep).await.is_err());
+
+    sftp::remove(s, remote, true).await.unwrap();
+    term.conn.disconnect().await;
+    let _ = std::fs::remove_dir_all(local);
+}
+
+async fn echo_server() -> u16 {
+    let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = echo.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = echo.accept().await {
+            tokio::spawn(async move {
+                let (mut r, mut w) = sock.split();
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
+    });
+    port
+}
+
+async fn roundtrip(sock: &mut tokio::net::TcpStream, msg: &[u8]) {
+    sock.write_all(msg).await.unwrap();
+    let mut buf = vec![0u8; msg.len()];
+    tokio::time::timeout(Duration::from_secs(5), sock.read_exact(&mut buf)).await.unwrap().unwrap();
+    assert_eq!(buf, msg);
+}
+
+#[tokio::test]
+async fn socks_and_remote_forwarding() {
+    let Some(params) = test_params(None) else {
+        return;
+    };
+    let (_out, sink) = Output::new();
+    let (on_exit, _) = exit_signal();
+    let term = ssh::connect(params, 80, 24, sink, accept_all(), on_exit).await.unwrap();
+    let echo = echo_server().await;
+
+    // SOCKS5: alan adıyla (localhost) hedef isteği.
+    let socks = term.conn.start_tunnel(ssh::TunnelKind::Socks, String::new(), 0, String::new(), 0).await.unwrap();
+    let mut c = tokio::net::TcpStream::connect(("127.0.0.1", socks.listen_port)).await.unwrap();
+    c.write_all(&[5, 1, 0]).await.unwrap();
+    let mut r = [0u8; 2];
+    c.read_exact(&mut r).await.unwrap();
+    assert_eq!(r, [5, 0]);
+    let mut req = vec![5, 1, 0, 3, 9];
+    req.extend_from_slice(b"localhost");
+    req.extend_from_slice(&echo.to_be_bytes());
+    c.write_all(&req).await.unwrap();
+    let mut rep = [0u8; 10];
+    c.read_exact(&mut rep).await.unwrap();
+    assert_eq!(rep[1], 0, "SOCKS bağlantısı başarılı olmalı");
+    roundtrip(&mut c, b"socks-ok").await;
+
+    // Ulaşılamayan hedefte hata kodu döner.
+    let mut c2 = tokio::net::TcpStream::connect(("127.0.0.1", socks.listen_port)).await.unwrap();
+    c2.write_all(&[5, 1, 0]).await.unwrap();
+    c2.read_exact(&mut r).await.unwrap();
+    c2.write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 0, 1]).await.unwrap();
+    let mut rep = [0u8; 10];
+    c2.read_exact(&mut rep).await.unwrap();
+    assert_ne!(rep[1], 0);
+
+    // Uzak yönlendirme: sunucudaki port → bu makinedeki yankı sunucusu.
+    let remote = term
+        .conn
+        .start_tunnel(ssh::TunnelKind::Remote, "localhost".into(), 0, "127.0.0.1".into(), echo)
+        .await
+        .unwrap();
+    assert!(remote.listen_port > 0);
+    let mut c3 = tokio::net::TcpStream::connect(("127.0.0.1", remote.listen_port)).await.unwrap();
+    roundtrip(&mut c3, b"uzak-ok").await;
+    assert_eq!(term.conn.tunnels().len(), 2);
+
+    term.conn.stop_tunnel(&remote.id).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", remote.listen_port)).await.is_err(), "sunucu artık dinlememeli");
+    term.conn.stop_tunnel(&socks.id).await;
+    assert!(term.conn.tunnels().is_empty());
+    term.conn.disconnect().await;
+}
+
+#[test]
+fn telnet_negotiation() {
+    use crate::raw::{escape_input, naws, TelnetParser};
+    let mut p = TelnetParser::default();
+    let (mut out, mut reply) = (Vec::new(), Vec::new());
+    // DO NAWS, DO TTYPE, WILL ECHO, DO (bilinmeyen 39), metin, kaçırılmış 255, SB TTYPE SEND.
+    let input = [
+        255, 253, 31, 255, 253, 24, 255, 251, 1, 255, 253, 39, b'h', b'i', 255, 255, 255, 250, 24, 1, 255, 240, b'!',
+    ];
+    // Paketin ortasından bölünmüş gelse de aynı sonuç.
+    p.feed(&input[..10], (100, 40), &mut out, &mut reply);
+    p.feed(&input[10..], (100, 40), &mut out, &mut reply);
+    assert_eq!(out, [b'h', b'i', 255, b'!']);
+    assert!(p.naws);
+    let mut expected = vec![255, 251, 31];
+    expected.extend(naws(100, 40));
+    expected.extend([255, 251, 24, 255, 253, 1, 255, 252, 39]);
+    expected.extend([255, 250, 24, 0]);
+    expected.extend(b"xterm-256color");
+    expected.extend([255, 240]);
+    assert_eq!(reply, expected);
+    assert_eq!(naws(80, 255), vec![255, 250, 31, 0, 80, 0, 255, 255, 255, 240]);
+    assert_eq!(escape_input(&[1, 255, 2]), vec![1, 255, 255, 2]);
+}
+
+#[tokio::test]
+async fn telnet_session_roundtrip() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Basit bir telnet sunucusu: NAWS ister, bir karşılama yazar, gelen satırı yankılar.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        s.write_all(&[255, 253, 31]).await.unwrap();
+        s.write_all(b"merhaba\r\n").await.unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 256];
+        while !got.ends_with(b"\r") {
+            let n = s.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        s.write_all(b"tamam\r\n").await.unwrap();
+        got
+    });
+    let (out, sink) = Output::new();
+    let (on_exit, exited) = exit_signal();
+    let t = crate::raw::telnet("127.0.0.1", port, 90, 30, sink, on_exit).await.unwrap();
+    out.wait_for("merhaba").await;
+    t.send(crate::raw::RawInput::Data(b"ls\r".to_vec())).unwrap();
+    out.wait_for("tamam").await;
+    let got = server.await.unwrap();
+    // İstemci önce WILL NAWS ve boyutu, sonra komutu göndermiş olmalı.
+    let mut expected = vec![255, 251, 31];
+    expected.extend(crate::raw::naws(90, 30));
+    expected.extend(b"ls\r");
+    assert_eq!(got, expected);
+    assert!(!out.text().contains('\u{fffd}'), "telnet komutları ekrana düşmemeli");
+    // Sunucu kapanınca bildirilir.
+    tokio::time::timeout(Duration::from_secs(5), exited).await.unwrap().unwrap();
+}
+
+/// Seri port: donanım yerine sanal bir terminal çifti (pty) kullanılır. macOS'ta pty'ler
+/// seri port hız ayarını (IOSSIOSPEED) desteklemediği için yalnızca Linux'ta çalışır.
+#[cfg(target_os = "linux")]
+#[test]
+fn serial_port_over_pty() {
+    use portable_pty::{native_pty_system, PtySize};
+    use std::io::{Read, Write};
+    let pair = native_pty_system()
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .unwrap();
+    let path = pair.master.tty_name().expect("pty yolu yok");
+    let mut peer_w = pair.master.take_writer().unwrap();
+    let mut peer_r = pair.master.try_clone_reader().unwrap();
+
+    let (out, sink) = Output::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = crate::raw::serial(
+        path.to_str().unwrap(),
+        115200,
+        sink,
+        Box::new(move |_| {
+            let _ = tx.send(());
+        }),
+    )
+    .unwrap();
+
+    // Aygıttan gelen veri terminale ulaşır.
+    peer_w.write_all(b"aygit-hazir\n").unwrap();
+    peer_w.flush().unwrap();
+    for _ in 0..50 {
+        if out.text().contains("aygit-hazir") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(out.text().contains("aygit-hazir"), "{:?}", out.text());
+
+    // Yazılan aygıta gider.
+    t.send(crate::raw::RawInput::Data(b"AT\r".to_vec())).unwrap();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 64];
+    while !got.windows(2).any(|w| w == b"AT") {
+        let n = peer_r.read(&mut buf).unwrap();
+        got.extend_from_slice(&buf[..n]);
+    }
+    t.send(crate::raw::RawInput::Close).unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).expect("kapanış bildirilmedi");
+    drop(pair.slave);
 }
