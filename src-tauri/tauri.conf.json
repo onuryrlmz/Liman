@@ -38,6 +38,9 @@
     "category": "DeveloperTool",
     "publisher": "onuryrlmz",
     "copyright": "© 2026 onuryrlmz. Tüm hakları saklıdır.",
-    "longDescription": "Liman; sekmeli SSH ve yerel terminal, otomatik açılan SFTP dosya tarayıcısı, oturum yöneticisi ve port tünellerini tek pencerede toplayan, macOS, Windows ve Linux için hafif bir uzak bağlantı istemcisidir."
+    "longDescription": "Liman; sekmeli SSH ve yerel terminal, otomatik açılan SFTP dosya tarayıcısı, oturum yöneticisi ve port tünellerini tek pencerede toplayan, macOS, Windows ve Linux için hafif bir uzak bağlantı istemcisidir.",
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }
