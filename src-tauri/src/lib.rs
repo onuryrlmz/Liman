@@ -1,3 +1,4 @@
+mod backup;
 mod local;
 mod sftp;
 mod ssh;
@@ -192,6 +193,61 @@ fn session_delete(id: String) -> CmdResult<()> {
     store::delete_session(&id).map_err(err)
 }
 
+#[tauri::command]
+fn session_move(id: String, folder: Option<String>) -> CmdResult<()> {
+    store::move_session(&id, folder).map_err(err)
+}
+
+#[tauri::command]
+fn groups_list() -> CmdResult<Vec<String>> {
+    store::load_groups().map_err(err)
+}
+
+#[tauri::command]
+fn group_create(name: String) -> CmdResult<()> {
+    store::create_group(&name).map_err(err)
+}
+
+#[tauri::command]
+fn group_rename(old: String, new: String) -> CmdResult<()> {
+    store::rename_group(&old, &new).map_err(err)
+}
+
+#[tauri::command]
+fn group_delete(name: String, delete_sessions: bool) -> CmdResult<()> {
+    store::delete_group(&name, delete_sessions).map_err(err)
+}
+
+// Argon2 bilinçli olarak yavaş; arayüzü kilitlememesi için ayrı iş parçacığında.
+#[tauri::command]
+async fn sessions_export(
+    path: String,
+    password: Option<String>,
+    group: Option<String>,
+) -> CmdResult<backup::ExportResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::export(PathBuf::from(path).as_path(), password.as_deref(), group.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
+#[tauri::command]
+fn sessions_import_info(path: String) -> CmdResult<backup::FileInfo> {
+    backup::inspect(PathBuf::from(path).as_path()).map_err(err)
+}
+
+#[tauri::command]
+async fn sessions_import(path: String, password: Option<String>) -> CmdResult<backup::ImportResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        backup::import(PathBuf::from(path).as_path(), password.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
 // ---------- SFTP ----------
 
 #[tauri::command]
@@ -346,6 +402,14 @@ pub fn run() {
             sessions_list,
             session_save,
             session_delete,
+            session_move,
+            groups_list,
+            group_create,
+            group_rename,
+            group_delete,
+            sessions_export,
+            sessions_import_info,
+            sessions_import,
             sftp_home,
             sftp_list,
             sftp_mkdir,

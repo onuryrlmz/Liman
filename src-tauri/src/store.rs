@@ -2,9 +2,10 @@
 
 use std::{fs, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(test, allow(dead_code))]
 const SERVICE: &str = "liman";
 /// Uygulamanın eski adı; ayarlar ve parolalar buradan taşınır.
 const LEGACY: &str = "yrlmzterm";
@@ -44,7 +45,18 @@ fn default_port() -> u16 {
     22
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Testlerde her iş parçacığı kendi ayar klasörünü kullanır.
+    pub static TEST_CONFIG_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 pub fn config_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = TEST_CONFIG_DIR.with(|d| d.borrow().clone()) {
+        let _ = fs::create_dir_all(&dir);
+        return dir;
+    }
     if let Some(dir) = std::env::var_os("LIMAN_CONFIG_DIR") {
         let dir = PathBuf::from(dir);
         let _ = fs::create_dir_all(&dir);
@@ -58,6 +70,13 @@ pub fn config_dir() -> PathBuf {
     }
     let _ = fs::create_dir_all(&dir);
     dir
+}
+
+pub fn expand_tilde(p: &str) -> PathBuf {
+    match (p.strip_prefix("~/"), dirs::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => PathBuf::from(p),
+    }
 }
 
 fn sessions_path() -> PathBuf {
@@ -77,11 +96,115 @@ pub fn load_sessions() -> Result<Vec<Session>> {
     Ok(serde_json::from_str(&text).context("Oturum dosyası bozuk")?)
 }
 
-fn write_sessions(sessions: &[Session]) -> Result<()> {
-    let path = sessions_path();
+fn write_json<T: Serialize + ?Sized>(path: PathBuf, value: &T) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(sessions)?)?;
+    fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
     fs::rename(tmp, path)?;
+    Ok(())
+}
+
+pub(crate) fn write_sessions(sessions: &[Session]) -> Result<()> {
+    write_json(sessions_path(), sessions)
+}
+
+// ---------- Gruplar ----------
+//
+// Bir oturumun grubu `folder` alanında durur. groups.json yalnızca sıralamayı
+// ve henüz oturumu olmayan boş grupları tutar.
+
+fn groups_path() -> PathBuf {
+    config_dir().join("groups.json")
+}
+
+fn clean_name(name: &str) -> Result<String> {
+    let n = name.trim();
+    if n.is_empty() {
+        bail!("Grup adı boş olamaz");
+    }
+    Ok(n.to_string())
+}
+
+pub fn load_groups() -> Result<Vec<String>> {
+    let path = groups_path();
+    let mut groups: Vec<String> = if path.exists() {
+        serde_json::from_str(&fs::read_to_string(&path)?).unwrap_or_default()
+    } else {
+        vec![]
+    };
+    for s in load_sessions()? {
+        if let Some(f) = s.folder.filter(|f| !f.is_empty()) {
+            if !groups.contains(&f) {
+                groups.push(f);
+            }
+        }
+    }
+    Ok(groups)
+}
+
+pub(crate) fn write_groups(groups: &[String]) -> Result<()> {
+    write_json(groups_path(), groups)
+}
+
+fn ensure_group(name: &str) -> Result<()> {
+    let mut groups = load_groups()?;
+    if !groups.iter().any(|g| g == name) {
+        groups.push(name.to_string());
+        write_groups(&groups)?;
+    }
+    Ok(())
+}
+
+pub fn create_group(name: &str) -> Result<()> {
+    ensure_group(&clean_name(name)?)
+}
+
+pub fn rename_group(old: &str, new: &str) -> Result<()> {
+    let new = clean_name(new)?;
+    let mut sessions = load_sessions()?;
+    for s in sessions.iter_mut().filter(|s| s.folder.as_deref() == Some(old)) {
+        s.folder = Some(new.clone());
+    }
+    let mut groups = load_groups()?;
+    if groups.contains(&new) {
+        groups.retain(|g| g != old);
+    } else if let Some(g) = groups.iter_mut().find(|g| *g == old) {
+        *g = new;
+    }
+    write_sessions(&sessions)?;
+    write_groups(&groups)
+}
+
+/// Grubu siler; oturumları ya grupsuz bırakır ya da onlarla birlikte siler.
+pub fn delete_group(name: &str, delete_sessions: bool) -> Result<()> {
+    let mut sessions = load_sessions()?;
+    if delete_sessions {
+        for s in sessions.iter().filter(|s| s.folder.as_deref() == Some(name)) {
+            delete_secret(&s.id);
+        }
+        sessions.retain(|s| s.folder.as_deref() != Some(name));
+    } else {
+        for s in sessions.iter_mut().filter(|s| s.folder.as_deref() == Some(name)) {
+            s.folder = None;
+        }
+    }
+    let mut groups = load_groups()?;
+    groups.retain(|g| g != name);
+    write_sessions(&sessions)?;
+    write_groups(&groups)
+}
+
+pub fn move_session(id: &str, folder: Option<String>) -> Result<()> {
+    let folder = folder.map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+    let mut sessions = load_sessions()?;
+    let s = sessions
+        .iter_mut()
+        .find(|s| s.id == id)
+        .context("Oturum bulunamadı")?;
+    s.folder = folder.clone();
+    write_sessions(&sessions)?;
+    if let Some(f) = folder {
+        ensure_group(&f)?;
+    }
     Ok(())
 }
 
@@ -109,6 +232,9 @@ pub fn save_session(mut session: Session, secret: Option<String>) -> Result<Sess
         None => sessions.push(session.clone()),
     }
     write_sessions(&sessions)?;
+    if let Some(f) = session.folder.as_deref().filter(|f| !f.is_empty()) {
+        ensure_group(f)?;
+    }
     Ok(session)
 }
 
@@ -128,12 +254,41 @@ pub fn mark_secret_saved(id: &str) -> Result<()> {
     Ok(())
 }
 
+// Testlerde gerçek sistem kasası yerine bellekte tutulur.
+#[cfg(test)]
+pub static TEST_SECRETS: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub fn set_secret(id: &str, secret: &str) -> Result<()> {
+    TEST_SECRETS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Default::default)
+        .insert(id.into(), secret.into());
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn get_secret(id: &str) -> Option<String> {
+    TEST_SECRETS.lock().unwrap().as_ref()?.get(id).cloned()
+}
+
+#[cfg(test)]
+fn delete_secret(id: &str) {
+    if let Some(m) = TEST_SECRETS.lock().unwrap().as_mut() {
+        m.remove(id);
+    }
+}
+
+#[cfg(not(test))]
 pub fn set_secret(id: &str, secret: &str) -> Result<()> {
     keyring::Entry::new(SERVICE, id)
         .and_then(|e| e.set_password(secret))
         .context("Parola sistem kasasına kaydedilemedi")
 }
 
+#[cfg(not(test))]
 pub fn get_secret(id: &str) -> Option<String> {
     if let Ok(pw) = keyring::Entry::new(SERVICE, id).and_then(|e| e.get_password()) {
         return Some(pw);
@@ -147,6 +302,7 @@ pub fn get_secret(id: &str) -> Option<String> {
     Some(pw)
 }
 
+#[cfg(not(test))]
 fn delete_secret(id: &str) {
     for service in [SERVICE, LEGACY] {
         if let Ok(e) = keyring::Entry::new(service, id) {

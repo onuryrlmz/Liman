@@ -24,6 +24,7 @@ class Store {
   tabs = $state<Tab[]>([]);
   activeKey = $state<string | null>(null);
   sessions = $state<Session[]>([]);
+  groups = $state<string[]>([]);
   shells = $state<string[]>([]);
   transfers = $state<Transfer[]>([]);
   /** SSH sekmesi başına SFTP klasörü (termId → yol). */
@@ -36,7 +37,7 @@ class Store {
 
   async loadSessions() {
     try {
-      this.sessions = await api.sessionsList();
+      [this.sessions, this.groups] = await Promise.all([api.sessionsList(), api.groupsList()]);
     } catch (e) {
       this.notify(errText(e), "error");
     }

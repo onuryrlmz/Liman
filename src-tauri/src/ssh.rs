@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -113,13 +113,6 @@ impl client::Handler for Client {
     }
 }
 
-fn expand_tilde(p: &str) -> PathBuf {
-    match (p.strip_prefix("~/"), dirs::home_dir()) {
-        (Some(rest), Some(home)) => home.join(rest),
-        _ => PathBuf::from(p),
-    }
-}
-
 async fn try_key(h: &mut client::Handle<Client>, user: &str, key: keys::PrivateKey) -> Result<bool> {
     let hash = h.best_supported_rsa_hash().await?.flatten();
     let res = h
@@ -158,7 +151,7 @@ async fn authenticate(h: &mut client::Handle<Client>, p: &ConnectParams) -> Resu
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| anyhow!("Anahtar dosyası seçilmedi"))?;
-            let key = keys::load_secret_key(expand_tilde(path), p.secret.as_deref())
+            let key = keys::load_secret_key(store::expand_tilde(path), p.secret.as_deref())
                 .map_err(|e| anyhow!("Anahtar okunamadı: {e}"))?;
             try_key(h, user, key).await
         }

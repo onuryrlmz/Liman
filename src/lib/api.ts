@@ -52,7 +52,28 @@ export interface Transfer {
   direction?: "up" | "down";
 }
 
+export interface ExportResult {
+  sessions: number;
+  secrets: number;
+  keys: number;
+}
+
+export interface ImportResult {
+  added: number;
+  updated: number;
+  secrets: number;
+  keys: number;
+  groups: number;
+}
+
+export interface BackupFileInfo {
+  encrypted: boolean;
+  sessions: number | null;
+}
+
 export const AUTH_FAILED = "AUTH_FAILED";
+export const PASSWORD_REQUIRED = "PASSWORD_REQUIRED";
+export const WRONG_PASSWORD = "WRONG_PASSWORD";
 
 function dataChannel(onData: (d: Uint8Array) => void) {
   const ch = new Channel<ArrayBuffer>();
@@ -73,6 +94,15 @@ export const api = {
   sessionsList: () => invoke<Session[]>("sessions_list"),
   sessionSave: (session: Session, secret: string | null) => invoke<Session>("session_save", { session, secret }),
   sessionDelete: (id: string) => invoke<void>("session_delete", { id }),
+  sessionMove: (id: string, folder: string | null) => invoke<void>("session_move", { id, folder }),
+  groupsList: () => invoke<string[]>("groups_list"),
+  groupCreate: (name: string) => invoke<void>("group_create", { name }),
+  groupRename: (old: string, name: string) => invoke<void>("group_rename", { old, new: name }),
+  groupDelete: (name: string, deleteSessions: boolean) => invoke<void>("group_delete", { name, deleteSessions }),
+  sessionsExport: (path: string, password: string | null, group: string | null) =>
+    invoke<ExportResult>("sessions_export", { path, password, group }),
+  sessionsImportInfo: (path: string) => invoke<BackupFileInfo>("sessions_import_info", { path }),
+  sessionsImport: (path: string, password: string | null) => invoke<ImportResult>("sessions_import", { path, password }),
 
   sftpHome: (id: string) => invoke<string>("sftp_home", { id }),
   sftpList: (id: string, path: string) => invoke<Entry[]>("sftp_list", { id, path }),

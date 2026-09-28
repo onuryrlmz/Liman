@@ -6,8 +6,10 @@ Tauri 2 (Rust) + Svelte 5 + xterm.js.
 ## Özellikler
 
 - Sekmeli terminal: yerel kabuk (zsh/bash, PowerShell/cmd/WSL) ve SSH
-- Oturum yöneticisi: klasörler, arama, çoğaltma; parolalar sistem kasasında
-  (Keychain / Windows Credential Manager / Secret Service)
+- Oturum yöneticisi: gruplar (sürükle-bırak ile taşıma, yeniden adlandırma, gruba toplu bağlanma),
+  arama, çoğaltma; parolalar sistem kasasında (Keychain / Windows Credential Manager / Secret Service)
+- Oturumları dışarı / içeri aktarma: parolalar ve özel anahtarlar dahil edilirse dosyanın tamamı
+  belirlenen parolayla şifrelenir (Argon2id + XChaCha20-Poly1305); tüm oturumlar ya da tek grup
 - SSH kimlik doğrulama: parola, keyboard-interactive, özel anahtar (parolalı da olur),
   otomatik (`~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`)
 - Host anahtarı doğrulama: `~/.ssh/known_hosts` ile uygulamanın kendi known_hosts dosyası;

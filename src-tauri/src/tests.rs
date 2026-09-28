@@ -81,16 +81,22 @@ fn local_shell_runs() {
         80,
         24,
         sink,
-        Box::new(move |_| {
-            let _ = tx.send(());
+        Box::new(move |code| {
+            let _ = tx.send(code);
         }),
     )
     .unwrap();
-    term.write(b"echo liman-$((40+2))\r").unwrap();
+    let (cmd, expect): (&[u8], &str) = if cfg!(windows) {
+        (b"echo liman-%COMPUTERNAME:~0,0%42\r", "liman-42")
+    } else {
+        (b"echo liman-$((40+2))\r", "liman-42")
+    };
+    term.write(cmd).unwrap();
     term.resize(120, 30).unwrap();
-    term.write(b"exit\r").unwrap();
-    rx.recv_timeout(Duration::from_secs(10)).expect("kabuk kapanmadı");
-    assert!(out.text().contains("liman-42"), "{}", out.text());
+    term.write(b"exit 3\r").unwrap();
+    let code = rx.recv_timeout(Duration::from_secs(10)).expect("kabuk kapanmadı");
+    assert_eq!(code, Some(3));
+    assert!(out.text().contains(expect), "{}", out.text());
 }
 
 #[tokio::test]
@@ -234,4 +240,127 @@ async fn ssh_wrong_key_reports_auth_failed() {
     assert!(err.to_string().contains(ssh::AUTH_FAILED), "{err}");
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(path.with_extension("pub"));
+}
+
+// ---------- Gruplar ve dışarı/içeri aktarma ----------
+
+fn fresh_config(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("liman-{name}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    store::TEST_CONFIG_DIR.with(|d| *d.borrow_mut() = Some(dir.clone()));
+    dir
+}
+
+fn session(name: &str, folder: Option<&str>, auth: store::AuthKind) -> store::Session {
+    store::Session {
+        id: String::new(),
+        name: name.into(),
+        host: format!("{name}.example.com"),
+        port: 22,
+        username: "root".into(),
+        auth,
+        key_path: None,
+        folder: folder.map(String::from),
+        has_secret: false,
+    }
+}
+
+#[test]
+fn groups_create_rename_move_delete() {
+    let dir = fresh_config("groups");
+    store::create_group("Boş grup").unwrap();
+    let a = store::save_session(session("a", Some("Üretim"), store::AuthKind::Password), None).unwrap();
+    let b = store::save_session(session("b", None, store::AuthKind::Auto), None).unwrap();
+    assert_eq!(store::load_groups().unwrap(), vec!["Boş grup", "Üretim"]);
+
+    store::move_session(&b.id, Some("Test".into())).unwrap();
+    store::rename_group("Üretim", "Prod").unwrap();
+    let find = |id: &str| store::load_sessions().unwrap().into_iter().find(|s| s.id == id).unwrap();
+    assert_eq!(find(&a.id).folder.as_deref(), Some("Prod"));
+    assert_eq!(store::load_groups().unwrap(), vec!["Boş grup", "Prod", "Test"]);
+
+    // Var olan bir grubun adına yeniden adlandırma iki grubu birleştirir.
+    store::rename_group("Test", "Prod").unwrap();
+    assert_eq!(store::load_groups().unwrap(), vec!["Boş grup", "Prod"]);
+
+    store::delete_group("Prod", false).unwrap();
+    assert!(find(&a.id).folder.is_none() && find(&b.id).folder.is_none());
+    store::move_session(&a.id, Some("Sil".into())).unwrap();
+    store::delete_group("Sil", true).unwrap();
+    assert_eq!(store::load_sessions().unwrap().len(), 1);
+    assert!(store::create_group("   ").is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn export_import_roundtrip_with_secrets() {
+    use crate::backup;
+
+    // --- Kaynak makine ---
+    let src = fresh_config("export");
+    let key_file = src.join("id_test");
+    std::fs::write(&key_file, "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n").unwrap();
+    let mut keyed = session("anahtarli", Some("Üretim"), store::AuthKind::Key);
+    keyed.key_path = Some(key_file.to_string_lossy().into());
+    let keyed = store::save_session(keyed, Some("anahtar-parolasi".into())).unwrap();
+    let pw = store::save_session(session("parolali", Some("Üretim"), store::AuthKind::Password), Some("çok gizli ş".into())).unwrap();
+    let plain = store::save_session(session("parolasiz", None, store::AuthKind::Auto), None).unwrap();
+    store::create_group("Boş").unwrap();
+
+    let enc = src.join("yedek.liman");
+    let r = backup::export(&enc, Some("dosya-parolasi"), None).unwrap();
+    assert_eq!((r.sessions, r.secrets, r.keys), (3, 2, 1));
+    let raw = std::fs::read_to_string(&enc).unwrap();
+    for leak in ["çok gizli", "anahtar-parolasi", "BEGIN OPENSSH", "parolali", "example.com"] {
+        assert!(!raw.contains(leak), "şifreli dosyada düz metin bulundu: {leak}");
+    }
+    assert!(backup::export(&src.join("x"), Some("kisa"), None).is_err());
+
+    let open_file = src.join("acik.json");
+    let r = backup::export(&open_file, None, Some("Üretim")).unwrap();
+    assert_eq!((r.sessions, r.secrets, r.keys), (2, 0, 0));
+    let raw = std::fs::read_to_string(&open_file).unwrap();
+    assert!(!raw.contains("çok gizli") && !raw.contains("BEGIN OPENSSH"));
+    assert!(!raw.contains("parolasiz"), "grup filtresi uygulanmadı");
+
+    // --- Hedef makine: boş ayarlar, boş kasa ---
+    *store::TEST_SECRETS.lock().unwrap() = None;
+    let dst = fresh_config("import");
+    let info = backup::inspect(&enc).unwrap();
+    assert!(info.encrypted && info.sessions.is_none());
+    let e = backup::import(&enc, None).err().unwrap();
+    assert!(e.to_string().contains(backup::PASSWORD_REQUIRED));
+    let e = backup::import(&enc, Some("yanlis-parola")).err().unwrap();
+    assert!(e.to_string().contains(backup::WRONG_PASSWORD));
+    assert!(store::load_sessions().unwrap().is_empty(), "yanlış parola veri yazmamalı");
+
+    let r = backup::import(&enc, Some("dosya-parolasi")).unwrap();
+    assert_eq!((r.added, r.updated, r.secrets, r.keys), (3, 0, 2, 1));
+    let sessions = store::load_sessions().unwrap();
+    let get = |id: &str| sessions.iter().find(|s| s.id == id).unwrap().clone();
+    assert_eq!(store::get_secret(&pw.id).as_deref(), Some("çok gizli ş"));
+    assert_eq!(store::get_secret(&keyed.id).as_deref(), Some("anahtar-parolasi"));
+    assert!(get(&pw.id).has_secret && !get(&plain.id).has_secret);
+    let new_key = get(&keyed.id).key_path.unwrap();
+    assert!(new_key.starts_with(dst.to_string_lossy().as_ref()));
+    assert_eq!(std::fs::read_to_string(&new_key).unwrap(), "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&new_key).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    assert_eq!(store::load_groups().unwrap(), vec!["Üretim", "Boş"]);
+
+    // Parolasız dosyayı tekrar içe aktarmak güncelleme yapar, kayıtlı parolaları silmez.
+    let r = backup::import(&open_file, None).unwrap();
+    assert_eq!((r.added, r.updated, r.secrets), (0, 2, 0));
+    assert_eq!(store::get_secret(&pw.id).as_deref(), Some("çok gizli ş"));
+    assert!(store::load_sessions().unwrap().iter().find(|s| s.id == pw.id).unwrap().has_secret);
+
+    // Başka bir dosya türü reddedilir.
+    std::fs::write(src.join("baska.json"), r#"{"format":"x","version":1,"appVersion":"1","encrypted":false}"#).unwrap();
+    assert!(backup::import(&src.join("baska.json"), None).is_err());
+
+    let _ = std::fs::remove_dir_all(src);
+    let _ = std::fs::remove_dir_all(dst);
 }

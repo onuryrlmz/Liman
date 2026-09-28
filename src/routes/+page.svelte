@@ -18,7 +18,7 @@
   let sidebarTab = $state<"sessions" | "sftp">("sessions");
   let sidebarOpen = $state(true);
   let sidebarWidth = $state(loadWidth());
-  let editing = $state<{ session: Session | null } | null>(null);
+  let editing = $state<{ session: Session | null; folder?: string | null } | null>(null);
   let tunnelTab = $state<Tab | null>(null);
   let aboutOpen = $state(false);
   let menu = $state<{ x: number; y: number; items: (MenuItem | null)[] } | null>(null);
@@ -185,13 +185,10 @@
           <button class:on={sidebarTab === "sftp"} onclick={() => (sidebarTab = "sftp")}>
             <Icon name="folder" size={14} /> SFTP
           </button>
-          {#if sidebarTab === "sessions"}
-            <button class="add" title="Yeni oturum" onclick={() => (editing = { session: null })}><Icon name="plus" size={14} /></button>
-          {/if}
         </div>
         <div class="side-body">
           {#if sidebarTab === "sessions"}
-            <SessionList onEdit={(s) => (editing = { session: s })} />
+            <SessionList onEdit={(s, folder) => (editing = { session: s, folder })} />
           {:else if sftpTermId}
             {#key sftpTermId}
               <SftpPanel termId={sftpTermId} />
@@ -309,7 +306,7 @@
   <div class="toast" class:err={store.toast.kind === "error"}>{store.toast.text}</div>
 {/if}
 {#if editing}
-  <SessionDialog session={editing.session} onClose={() => (editing = null)} />
+  <SessionDialog session={editing.session} folder={editing.folder} onClose={() => (editing = null)} />
 {/if}
 {#if tunnelTab}
   <TunnelDialog tab={tunnelTab} onClose={() => (tunnelTab = null)} />
@@ -580,9 +577,6 @@
   .side-tabs button.on {
     color: var(--text);
     border-bottom-color: var(--accent);
-  }
-  .side-tabs .add {
-    margin-left: auto;
   }
   .side-body {
     flex: 1;

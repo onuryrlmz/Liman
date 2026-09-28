@@ -1,15 +1,19 @@
 //! Yerel kabuk: macOS/Linux'ta $SHELL, Windows'ta PowerShell.
 
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    sync::mpsc,
+    time::Duration,
+};
 
 use anyhow::Result;
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use crate::ssh::{OnExit, Sink};
 
 pub struct LocalTerm {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
 impl LocalTerm {
@@ -24,7 +28,7 @@ impl LocalTerm {
     }
 
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
+        let _ = self.killer.kill();
     }
 }
 
@@ -60,11 +64,13 @@ pub fn spawn(
     if let Some(home) = dirs::home_dir() {
         cmd.cwd(home);
     }
-    let child = pair.slave.spawn_command(cmd)?;
+    let mut child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
+    let killer = child.clone_killer();
 
     let mut reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;
+    let (reader_done, reader_finished) = mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 16 * 1024];
         loop {
@@ -73,13 +79,20 @@ pub fn spawn(
                 Ok(n) => out(buf[..n].to_vec()),
             }
         }
-        on_exit(None);
+        let _ = reader_done.send(());
+    });
+    // Kapanışı süreçten algıla: Windows'ta (ConPTY) kabuk çıksa da okuma ucu açık kalır.
+    std::thread::spawn(move || {
+        let code = child.wait().ok().map(|s| s.exit_code());
+        // Son çıktının terminale ulaşması için okuyucuya kısa bir süre tanı.
+        let _ = reader_finished.recv_timeout(Duration::from_millis(300));
+        on_exit(code);
     });
 
     Ok(LocalTerm {
         writer,
         master: pair.master,
-        child,
+        killer,
     })
 }
 

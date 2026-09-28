@@ -6,12 +6,13 @@
 
   let {
     session,
+    folder = null,
     onClose,
-  }: { session: Session | null; onClose: () => void } = $props();
+  }: { session: Session | null; folder?: string | null; onClose: () => void } = $props();
 
   const initial: Session = session
     ? { ...session }
-    : { id: "", name: "", host: "", port: 22, username: "", auth: "auto", keyPath: "", folder: "" };
+    : { id: "", name: "", host: "", port: 22, username: "", auth: "auto", keyPath: "", folder: folder ?? "" };
 
   let form = $state(initial);
   let secret = $state("");
@@ -19,9 +20,7 @@
   let busy = $state(false);
   let error = $state("");
 
-  const folders = $derived(
-    [...new Set(store.sessions.map((s) => s.folder).filter((f): f is string => !!f))].sort(),
-  );
+  const folders = $derived(store.groups);
 
   async function pickKey() {
     const p = await open({ title: "Özel anahtar seç", multiple: false, directory: false });
@@ -117,7 +116,7 @@
       <input bind:value={form.name} placeholder="isteğe bağlı" />
     </label>
     <label>
-      <span>Klasör</span>
+      <span>Grup</span>
       <input bind:value={form.folder} list="folders" placeholder="örn. Üretim" />
       <datalist id="folders">
         {#each folders as f}<option value={f}></option>{/each}
