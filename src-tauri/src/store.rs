@@ -140,6 +140,34 @@ fn write_json<T: Serialize + ?Sized>(path: PathBuf, value: &T) -> Result<()> {
     Ok(())
 }
 
+// ---------- Komut parçacıkları ----------
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Snippet {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    /// Gönderdikten sonra Enter'a basılsın mı?
+    #[serde(default = "yes")]
+    pub run: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+pub fn load_snippets() -> Vec<Snippet> {
+    fs::read_to_string(config_dir().join("snippets.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_snippets(snippets: &[Snippet]) -> Result<()> {
+    write_json(config_dir().join("snippets.json"), snippets)
+}
+
 // ---------- Ayarlar ----------
 // Arayüz ayarları; içeriğini arayüz belirler, burada yalnızca saklanır.
 

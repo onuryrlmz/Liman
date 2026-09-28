@@ -20,6 +20,10 @@ Tauri 2 (Rust) + Svelte 5 + xterm.js.
 - Kopan bağlantılara otomatik yeniden bağlanma
 - Terminalde arama (⌘F / Ctrl+Shift+F), yakınlaştırma (⌘ + / − / 0), temalar ve yazı tipi ayarları
 - Otomatik güncelleme (GitHub Releases üzerinden, imzalı)
+- Bölünmüş ekran: bir sekmede yan yana / alt alta panolar; SSH panoları aynı bağlantıyı paylaşır
+- MultiExec: yazılanı sekmedeki tüm panolara ya da tüm sekmelere gönderme
+- Komut parçacıkları ve komut paleti (⌘P / Ctrl+Shift+P)
+- Oturum kaydı: terminal çıktısı renk kodlarından arındırılmış düz metin olarak dosyaya
 - SSH bağlanınca otomatik açılan SFTP paneli: gezinme, yükleme/indirme (klasörler dahil,
   ilerleme göstergesiyle), sürükle-bırak yükleme, yeniden adlandırma, silme, yeni klasör,
   uzak dosyayı düzenleme
@@ -38,6 +42,10 @@ Tauri 2 (Rust) + Svelte 5 + xterm.js.
 | ⌘F | Ctrl+Shift+F | Terminalde ara |
 | ⌘ + / − / 0 | Ctrl + / − / 0 | Yazıyı büyüt / küçült / sıfırla |
 | ⌘, | Ctrl+, | Ayarlar |
+| ⌘D / ⇧⌘D | Ctrl+Shift+D / E | Sağa / aşağı böl |
+| ⌘] / ⌘[ | Ctrl+Shift+] / [ | Sonraki / önceki pano |
+| ⇧⌘I / ⌥⇧⌘I | Ctrl+Shift+I / Ctrl+Alt+Shift+I | MultiExec: sekme / tüm sekmeler |
+| ⌘P | Ctrl+Shift+P | Komut paleti |
 | Ctrl+Tab | Ctrl+Tab | Sonraki sekme |
 | ⌘1…9 | | Sekmeye git |
 

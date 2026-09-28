@@ -339,6 +339,7 @@ fn export_import_roundtrip_with_secrets() {
     let plain = store::save_session(session("parolasiz", None, store::AuthKind::Auto), None).unwrap();
     store::create_group("Boş").unwrap();
 
+    store::save_snippets(&[store::Snippet { id: "s1".into(), name: "disk".into(), command: "df -h".into(), run: true }]).unwrap();
     let enc = src.join("yedek.liman");
     let r = backup::export(&enc, Some("dosya-parolasi"), None).unwrap();
     assert_eq!((r.sessions, r.secrets, r.keys), (3, 2, 1));
@@ -382,6 +383,8 @@ fn export_import_roundtrip_with_secrets() {
         assert_eq!(std::fs::metadata(&new_key).unwrap().permissions().mode() & 0o777, 0o600);
     }
     assert_eq!(store::load_groups().unwrap(), vec!["Üretim", "Boş"]);
+    assert_eq!(r.snippets, 1);
+    assert_eq!(store::load_snippets()[0].command, "df -h");
 
     // Parolasız dosyayı tekrar içe aktarmak güncelleme yapar, kayıtlı parolaları silmez.
     let r = backup::import(&open_file, None).unwrap();
@@ -579,5 +582,59 @@ fn import_skips_duplicates_and_relinks_jump() {
     assert_eq!((r.added, r.skipped), (1, 1));
     let c = store::load_sessions().unwrap().into_iter().find(|s| s.name == "cocuk").unwrap();
     assert_eq!(c.jump.as_deref(), Some(existing.id.as_str()));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn split_pane_shares_connection() {
+    let Some(params) = test_params(None) else {
+        return;
+    };
+    let (out1, sink1) = Output::new();
+    let (on_exit1, exited1) = exit_signal();
+    let first = ssh::connect(params, 80, 24, sink1, accept_all(), on_exit1).await.unwrap();
+    let (out2, sink2) = Output::new();
+    let (on_exit2, _) = exit_signal();
+    let second = first.conn.open_shell(80, 24, sink2, on_exit2).await.unwrap();
+    assert!(Arc::ptr_eq(&first.conn, &second.conn));
+
+    first.send(ssh::SshInput::Data(b"echo bir-$((0+1))\n".to_vec())).unwrap();
+    second.send(ssh::SshInput::Data(b"echo iki-$((1+1))\n".to_vec())).unwrap();
+    out1.wait_for("bir-1").await;
+    out2.wait_for("iki-2").await;
+    assert!(!out1.text().contains("iki-2") && !out2.text().contains("bir-1"));
+
+    // Bir pano kapanınca diğeri çalışmaya devam eder.
+    first.send(ssh::SshInput::Data(b"exit 0\n".to_vec())).unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(10), exited1).await.unwrap().unwrap(), Some(0));
+    second.send(ssh::SshInput::Data(b"echo hala-$((2+1))\n".to_vec())).unwrap();
+    out2.wait_for("hala-3").await;
+    second.conn.disconnect().await;
+}
+
+#[test]
+fn session_log_strips_escape_sequences() {
+    use crate::logger::{SessionLog, Strip};
+    let mut out = Vec::new();
+    let mut s = Strip::new();
+    // Renk, imleç, pencere başlığı (OSC), karakter kümesi ve CR/LF.
+    s.feed(b"\x1b]0;baslik\x07\x1b[1;32muser@host\x1b[0m:~$ ls\r\n\x1b(Bdosya \x1b[K", None, &mut out);
+    s.feed(b"ikinci\r\n\x1b]7;file://x\x1b\\son", None, &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "user@host:~$ ls\ndosya ikinci\nson");
+
+    let mut out = Vec::new();
+    let mut s = Strip::new();
+    s.feed("bir\nİki şğü\n".as_bytes(), Some("[T] "), &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "[T] bir\n[T] İki şğü\n");
+
+    let dir = std::env::temp_dir().join(format!("liman-log-{}", uuid::Uuid::new_v4()));
+    let log = SessionLog::create(dir.clone(), "web/1 prod", false).unwrap();
+    log.write(b"\x1b[31mhata\x1b[0m\r\n");
+    let name = log.path.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with("web_1_prod_") && name.ends_with(".log"), "{name}");
+    drop(log);
+    let text = std::fs::read_to_string(dir.join(&name)).unwrap();
+    assert!(text.starts_with("# Liman oturum kaydı: web/1 prod"));
+    assert!(text.ends_with("\nhata\n"), "{text:?}");
     let _ = std::fs::remove_dir_all(dir);
 }

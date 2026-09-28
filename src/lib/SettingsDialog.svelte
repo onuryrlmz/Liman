@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { open } from "@tauri-apps/plugin-dialog";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
   import Modal from "./Modal.svelte";
+  import { api } from "./api";
   import Updater from "./Updater.svelte";
   import { settings, themes, fonts, defaults, MIN_FONT, MAX_FONT } from "./settings.svelte";
 
@@ -7,6 +10,15 @@
 
   const s = $derived(settings.value);
   const fontLabel = (f: string) => f.split(",")[0].replaceAll('"', "");
+  let defaultLogDir = $state("");
+  api.logDefaultDir().then((d) => (defaultLogDir = d)).catch(() => {});
+  const logDir = $derived(s.logDir || defaultLogDir);
+
+  async function pickLogDir() {
+    const d = await open({ directory: true, title: "Kayıt klasörü", defaultPath: logDir || undefined });
+    if (typeof d === "string") settings.update({ logDir: d });
+  }
+
   const mod = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl";
 </script>
 
@@ -88,6 +100,23 @@
     </section>
 
     <section>
+      <h3>Oturum kaydı</h3>
+      <label class="check">
+        <input type="checkbox" checked={s.sessionLog} onchange={(e) => settings.update({ sessionLog: e.currentTarget.checked })} />
+        <span>Terminal çıktısını dosyaya kaydet <small>Her yeni terminal için ayrı, renk kodlarından arındırılmış bir .log dosyası</small></span>
+      </label>
+      {#if s.sessionLog}
+        <div class="logdir">
+          <code title={logDir}>{logDir}</code>
+          <button class="btn" onclick={pickLogDir}>Değiştir…</button>
+          <button class="btn" onclick={() => revealItemInDir(logDir).catch(() => {})}>Aç</button>
+        </div>
+        <label class="check"><input type="checkbox" checked={s.logTimestamps} onchange={(e) => settings.update({ logTimestamps: e.currentTarget.checked })} /> Satırlara saat ekle</label>
+        <p class="hint">Kayıt, bu ayar açıkken başlatılan terminallerde yapılır. Parolalar ekrana yazılmadığı için kayda da girmez.</p>
+      {/if}
+    </section>
+
+    <section>
       <h3>Güncellemeler</h3>
       <label class="check">
         <input type="checkbox" checked={s.checkUpdates} onchange={(e) => settings.update({ checkUpdates: e.currentTarget.checked })} />
@@ -149,6 +178,32 @@
     display: block;
     color: var(--muted);
     font-size: 11.5px;
+  }
+  .logdir {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .logdir code {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;
+    text-align: left;
+  }
+  .logdir .btn {
+    padding: 5px 10px;
+  }
+  .hint {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--muted);
   }
   .row {
     display: flex;

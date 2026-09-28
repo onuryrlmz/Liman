@@ -43,7 +43,7 @@
     store.sessions.filter((s) => (!s.folder || !store.groups.includes(s.folder)) && matches(s)).sort(byName),
   );
 
-  const openCount = (s: Session) => store.tabs.filter((t) => t.sessionId === s.id && t.status === "open").length;
+  const openCount = (s: Session) => store.panes.filter((t) => t.sessionId === s.id && t.status === "open").length;
 
   async function run(fn: () => Promise<unknown>) {
     try {

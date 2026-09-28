@@ -9,17 +9,20 @@
   import AboutDialog from "$lib/AboutDialog.svelte";
   import HostKeyDialog from "$lib/HostKeyDialog.svelte";
   import SettingsDialog from "$lib/SettingsDialog.svelte";
+  import SnippetList from "$lib/SnippetList.svelte";
+  import Palette, { type PaletteItem } from "$lib/Palette.svelte";
   import { settings } from "$lib/settings.svelte";
   import { updater } from "$lib/update-store.svelte";
   import ContextMenu, { type MenuItem } from "$lib/ContextMenu.svelte";
   import Icon from "$lib/Icon.svelte";
   import { api, formatSize, parseQuick, type Session, type Transfer } from "$lib/api";
-  import { store, type Tab } from "$lib/tabs.svelte";
+  import { store, computeLayout, leaves, type Tab, type View, type Rect, type SplitDir } from "$lib/tabs.svelte";
 
   const isMac = navigator.platform.toLowerCase().includes("mac");
   const mod = isMac ? "⌘" : "Ctrl+Shift+";
 
-  let sidebarTab = $state<"sessions" | "sftp">("sessions");
+  let sidebarTab = $state<"sessions" | "sftp" | "snippets">("sessions");
+  let paletteOpen = $state(false);
   let sidebarOpen = $state(true);
   let sidebarWidth = $state(loadWidth());
   let editing = $state<{ session: Session | null; folder?: string | null } | null>(null);
@@ -53,6 +56,7 @@
 
   onMount(() => {
     store.loadSessions();
+    store.loadSnippets();
     settings.load().then(() => {
       if (settings.value.checkUpdates) updater.check(true);
     });
@@ -90,20 +94,107 @@
     };
   }
 
-  function tabMenu(ev: MouseEvent, tab: Tab) {
+  function tabMenu(ev: MouseEvent, view: View) {
     ev.preventDefault();
-    menu = {
-      x: ev.clientX,
-      y: ev.clientY,
-      items: [
-        { label: "Yeniden bağlan", icon: "refresh", disabled: tab.status === "open" || tab.status === "connecting", action: () => terminals[tab.key]?.restart() },
-        { label: "Çoğalt", icon: "copy", action: () => store.duplicate(tab) },
-        tab.kind !== "local" ? { label: "Tüneller…", icon: "tunnel", disabled: tab.status !== "open", action: () => (tunnelTab = tab) } : null,
-        null,
-        { label: "Kapat", icon: "x", action: () => store.close(tab.key) },
-        { label: "Diğerlerini kapat", action: () => store.tabs.filter((t) => t.key !== tab.key).forEach((t) => store.close(t.key)) },
-      ].filter((x, i) => x !== null || i === 3),
+    store.activeKey = view.key;
+    const tab = store.pane(view.focus);
+    if (!tab) return;
+    const many = leaves(view.root).length > 1;
+    const items: (MenuItem | null)[] = [
+      { label: `Sağa böl (${splitKeys.row})`, icon: "splitRow", action: () => store.split("row", view) },
+      { label: `Aşağı böl (${splitKeys.col})`, icon: "splitCol", action: () => store.split("col", view) },
+      null,
+      { label: "Yeniden bağlan", icon: "refresh", disabled: tab.status === "open" || tab.status === "connecting", action: () => terminals[tab.key]?.restart() },
+      { label: "Yeni sekmede çoğalt", icon: "copy", action: () => store.duplicate(tab) },
+    ];
+    if (tab.kind !== "local") {
+      items.push({ label: "Tüneller…", icon: "tunnel", disabled: tab.status !== "open", action: () => (tunnelTab = tab) });
+    }
+    items.push(null);
+    if (many) items.push({ label: "Bu panoyu kapat", icon: "x", action: () => store.closePane(tab.key) });
+    items.push(
+      { label: many ? "Sekmeyi kapat" : "Kapat", icon: many ? undefined : "x", action: () => store.close(view.key) },
+      { label: "Diğer sekmeleri kapat", action: () => store.views.filter((v) => v.key !== view.key).forEach((v) => store.close(v.key)) },
+    );
+    menu = { x: ev.clientX, y: ev.clientY, items };
+  }
+
+  const paletteKey = isMac ? "⌘P" : "Ctrl+Shift+P";
+
+  function paletteItems(): PaletteItem[] {
+    const connected = store.active && store.active.kind !== "sftp" && store.active.status === "open";
+    const items: PaletteItem[] = [];
+    if (connected) {
+      for (const sn of store.snippets) {
+        items.push({ kind: "Parçacık", icon: "bolt", label: sn.name, detail: sn.command.split("\n")[0], action: () => store.runSnippet(sn) });
+      }
+    }
+    for (const se of store.sessions) {
+      items.push({
+        kind: se.kind === "sftp" ? "SFTP" : "Bağlan",
+        icon: se.kind === "sftp" ? "folder" : "server",
+        label: se.name,
+        detail: `${se.username ? se.username + "@" : ""}${se.host}${se.folder ? " · " + se.folder : ""}`,
+        action: () => store.openSession(se),
+      });
+    }
+    for (const v of store.views) {
+      const p = store.pane(v.focus);
+      if (p) items.push({ kind: "Sekme", icon: "terminal", label: p.title, action: () => (store.activeKey = v.key) });
+    }
+    const act = (label: string, icon: string, action: () => void) => items.push({ kind: "Komut", icon, label, action });
+    act("Yeni yerel terminal", "terminal", () => store.openLocal());
+    act("Yeni oturum", "plus", () => (editing = { session: null }));
+    if (store.active) {
+      act("Sağa böl", "splitRow", () => store.split("row"));
+      act("Aşağı böl", "splitCol", () => store.split("col"));
+    }
+    act(store.broadcast === "off" ? "MultiExec'i aç (bu sekme)" : "MultiExec'i kapat", "broadcast", () => toggleBroadcast(store.broadcast === "off" ? "tab" : (store.broadcast as "tab" | "all")));
+    act("Parçacıkları göster", "bolt", () => ((sidebarTab = "snippets"), (sidebarOpen = true)));
+    act("Ayarlar", "gear", () => (settingsOpen = true));
+    act("Hakkında", "info", () => (aboutOpen = true));
+    return items;
+  }
+
+  function toggleBroadcast(scope: "tab" | "all") {
+    store.broadcast = store.broadcast === scope ? "off" : scope;
+    if (store.broadcast !== "off") {
+      store.notify(scope === "all" ? "MultiExec: yazdıklarınız TÜM sekmelere gidiyor" : "MultiExec: yazdıklarınız bu sekmedeki tüm panolara gidiyor");
+    }
+  }
+
+  const broadcastKeys = isMac ? { tab: "⇧⌘I", all: "⌥⇧⌘I" } : { tab: "Ctrl+Shift+I", all: "Ctrl+Alt+Shift+I" };
+
+  const splitKeys: Record<SplitDir, string> = isMac ? { row: "⌘D", col: "⇧⌘D" } : { row: "Ctrl+Shift+D", col: "Ctrl+Shift+E" };
+
+  // Bölünmüş panolar: konumlar yerleşim ağacından hesaplanır. Terminal bileşenleri
+  // düz bir listede kalır ki bölme/kapama sırasında yeniden oluşturulmasınlar.
+  const layouts = $derived(new Map(store.views.map((v) => [v.key, computeLayout(v.root)])));
+  function paneRect(key: string): { view: View | null; rect: Rect } {
+    const view = store.viewOf(key);
+    return { view, rect: (view && layouts.get(view.key)?.panes.get(key)) || { x: 0, y: 0, w: 1, h: 1 } };
+  }
+  let panesEl = $state<HTMLDivElement>();
+
+  function dragDivider(e: PointerEvent, node: Extract<import("$lib/tabs.svelte").Layout, { type: "split" }>, area: Rect) {
+    e.preventDefault();
+    const box = panesEl!.getBoundingClientRect();
+    const move = (ev: PointerEvent) => {
+      const pos =
+        node.dir === "row"
+          ? ((ev.clientX - box.left) / box.width - area.x) / area.w
+          : ((ev.clientY - box.top) / box.height - area.y) / area.h;
+      node.ratio = Math.max(0.1, Math.min(0.9, pos));
+      // Nesne yerinde değişti; türetilmiş yerleşimi tazele.
+      const v = store.activeView;
+      if (v) v.root = { ...v.root };
     };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   }
 
   function onKey(e: KeyboardEvent) {
@@ -113,7 +204,18 @@
     } else if (primary && e.code === "KeyT") {
       store.openLocal();
     } else if (primary && e.code === "KeyW") {
-      if (store.activeKey) store.close(store.activeKey);
+      const v = store.activeView;
+      if (v) store.closePane(v.focus);
+    } else if (isMac ? e.metaKey && !e.ctrlKey && e.code === "KeyD" : e.ctrlKey && e.shiftKey && e.code === "KeyD") {
+      store.split(isMac && e.shiftKey ? "col" : "row");
+    } else if (!isMac && e.ctrlKey && e.shiftKey && e.code === "KeyE") {
+      store.split("col");
+    } else if (primary && e.code === "KeyP") {
+      paletteOpen = !paletteOpen;
+    } else if (primary && e.code === "KeyI") {
+      toggleBroadcast(e.altKey ? "all" : "tab");
+    } else if (primary && (e.code === "BracketRight" || e.code === "BracketLeft")) {
+      store.focusNext(e.code === "BracketRight" ? 1 : -1);
     } else if (primary && e.code === "KeyN") {
       editing = { session: null };
     } else if (primary && e.code === "KeyB") {
@@ -127,8 +229,8 @@
     } else if (zoomMod(e) && e.code === "Comma") {
       settingsOpen = true;
     } else if (isMac && e.metaKey && /^Digit[1-9]$/.test(e.code)) {
-      const t = store.tabs[Number(e.code.slice(5)) - 1];
-      if (t) store.activeKey = t.key;
+      const v = store.views[Number(e.code.slice(5)) - 1];
+      if (v) store.activeKey = v.key;
     } else return;
     e.preventDefault();
     e.stopPropagation();
@@ -187,6 +289,55 @@
     >
       <Icon name="tunnel" size={18} /><span>Tüneller</span>
     </button>
+    <div class="split">
+      <button class="tool" disabled={!active} onclick={() => store.split("row")} title="Sağa böl ({splitKeys.row})">
+        <Icon name="splitRow" size={18} /><span>Böl</span>
+      </button>
+      <button
+        class="tool caret"
+        disabled={!active}
+        title="Bölme yönü"
+        onclick={(ev) => {
+          const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+          menu = {
+            x: r.left,
+            y: r.bottom + 4,
+            items: [
+              { label: `Sağa böl (${splitKeys.row})`, icon: "splitRow", action: () => store.split("row") },
+              { label: `Aşağı böl (${splitKeys.col})`, icon: "splitCol", action: () => store.split("col") },
+            ],
+          };
+        }}><Icon name="chevronDown" size={13} /></button
+      >
+    </div>
+    <div class="split">
+      <button
+        class="tool"
+        class:on={store.broadcast !== "off"}
+        class:warn={store.broadcast !== "off"}
+        onclick={() => toggleBroadcast("tab")}
+        title="MultiExec: bu sekmedeki tüm panolara yaz ({broadcastKeys.tab})"
+      >
+        <Icon name="broadcast" size={18} /><span>{store.broadcast === "all" ? "Tümüne" : "MultiExec"}</span>
+      </button>
+      <button
+        class="tool caret"
+        title="MultiExec kapsamı"
+        onclick={(ev) => {
+          const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+          menu = {
+            x: r.left,
+            y: r.bottom + 4,
+            items: [
+              { label: `Bu sekmedeki panolar (${broadcastKeys.tab})`, icon: store.broadcast === "tab" ? "check" : undefined, action: () => toggleBroadcast("tab") },
+              { label: `Tüm sekmeler (${broadcastKeys.all})`, icon: store.broadcast === "all" ? "check" : undefined, action: () => toggleBroadcast("all") },
+              null,
+              { label: "Kapat", disabled: store.broadcast === "off", action: () => (store.broadcast = "off") },
+            ],
+          };
+        }}><Icon name="chevronDown" size={13} /></button
+      >
+    </div>
     <button class="tool" class:on={sidebarOpen} onclick={() => (sidebarOpen = !sidebarOpen)} title="Kenar çubuğu ({mod}B)">
       <Icon name="sidebar" size={18} /><span>Panel</span>
     </button>
@@ -212,10 +363,15 @@
           <button class:on={sidebarTab === "sftp"} onclick={() => (sidebarTab = "sftp")}>
             <Icon name="folder" size={14} /> SFTP
           </button>
+          <button class:on={sidebarTab === "snippets"} onclick={() => (sidebarTab = "snippets")} title="Komut parçacıkları">
+            <Icon name="bolt" size={14} /> Parçacık
+          </button>
         </div>
         <div class="side-body">
           {#if sidebarTab === "sessions"}
             <SessionList onEdit={(s, folder) => (editing = { session: s, folder })} />
+          {:else if sidebarTab === "snippets"}
+            <SnippetList />
           {:else if sftpTermId}
             {#key sftpTermId}
               <SftpPanel termId={sftpTermId} />
@@ -234,40 +390,60 @@
 
     <section class="work">
       <nav class="tabbar">
-        {#each store.tabs as tab (tab.key)}
-          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div
-            class="tab"
-            class:on={tab.key === store.activeKey}
-            onclick={() => (store.activeKey = tab.key)}
-            onauxclick={(e) => e.button === 1 && store.close(tab.key)}
-            oncontextmenu={(e) => tabMenu(e, tab)}
-            title={describe(tab)}
-          >
-            <span class="st {tab.status}"></span>
-            <Icon name={tab.kind === "ssh" ? "server" : tab.kind === "sftp" ? "folder" : "terminal"} size={13} />
-            <span class="title">{tab.title}</span>
-            <button
-              class="close"
-              aria-label="Sekmeyi kapat"
-              onclick={(e) => {
-                e.stopPropagation();
-                store.close(tab.key);
-              }}><Icon name="x" size={12} /></button
+        {#each store.views as view (view.key)}
+          {@const tab = store.pane(view.focus)}
+          {@const count = leaves(view.root).length}
+          {#if tab}
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div
+              class="tab"
+              class:on={view.key === store.activeKey}
+              onclick={() => (store.activeKey = view.key)}
+              onauxclick={(e) => e.button === 1 && store.close(view.key)}
+              oncontextmenu={(e) => tabMenu(e, view)}
+              title={describe(tab)}
             >
-          </div>
+              <span class="st {tab.status}"></span>
+              <Icon name={tab.kind === "ssh" ? "server" : tab.kind === "sftp" ? "folder" : "terminal"} size={13} />
+              <span class="title">{tab.title}</span>
+              {#if count > 1}<span class="count" title="{count} pano">{count}</span>{/if}
+              <button
+                class="close"
+                aria-label="Sekmeyi kapat"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  store.close(view.key);
+                }}><Icon name="x" size={12} /></button
+              >
+            </div>
+          {/if}
         {/each}
         <button class="newtab" title="Yeni yerel terminal" onclick={() => store.openLocal()}><Icon name="plus" size={14} /></button>
       </nav>
 
-      <div class="panes">
-        {#each store.tabs as tab (tab.key)}
-          <div class="pane" class:hidden={tab.key !== store.activeKey}>
+      <div class="panes" bind:this={panesEl}>
+        {#each store.panes as tab (tab.key)}
+          {@const { view, rect } = paneRect(tab.key)}
+          {@const visible = !!view && view.key === store.activeKey}
+          {@const split = !!view && view.root.type === "split"}
+          <div
+            class="pane"
+            class:hidden={!visible}
+            class:split
+            class:focused={split && view?.focus === tab.key}
+            class:broadcast={store.inBroadcast(tab.key) && tab.kind !== "sftp"}
+            style:left="{rect.x * 100}%"
+            style:top="{rect.y * 100}%"
+            style:width="{rect.w * 100}%"
+            style:height="{rect.h * 100}%"
+          >
             <Terminal
               bind:this={terminals[tab.key]}
               {tab}
-              active={tab.key === store.activeKey}
+              {visible}
+              focused={view?.focus === tab.key}
               onUpdate={(p) => store.patch(tab.key, p)}
+              onFocus={() => store.focusPane(tab.key)}
             />
             <!-- Yalnızca SFTP: bağlıyken terminalin yerine tam ekran dosya tarayıcısı.
                  Bağlantı koparsa terminal (günlük ve "R ile yeniden bağlan") yeniden görünür. -->
@@ -281,7 +457,24 @@
           </div>
         {/each}
 
-        {#if !store.tabs.length}
+        {#if store.activeView}
+          {#each layouts.get(store.activeView.key)?.dividers ?? [] as d}
+            {@const r = d.node.dir === "row"}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              class="divider"
+              class:row={r}
+              class:col={!r}
+              style:left="{(r ? d.area.x + d.area.w * d.node.ratio : d.area.x) * 100}%"
+              style:top="{(r ? d.area.y : d.area.y + d.area.h * d.node.ratio) * 100}%"
+              style:width={r ? null : `${d.area.w * 100}%`}
+              style:height={r ? `${d.area.h * 100}%` : null}
+              onpointerdown={(e) => dragDivider(e, d.node, d.area)}
+            ></div>
+          {/each}
+        {/if}
+
+        {#if !store.views.length}
           <div class="home">
             <div class="hero">
               <div class="big-logo"><Icon name="anchor" size={32} /></div>
@@ -362,6 +555,9 @@
   <TunnelDialog tab={tunnelTab} onClose={() => (tunnelTab = null)} />
 {/if}
 <HostKeyDialog />
+{#if paletteOpen}
+  <Palette items={paletteItems()} onClose={() => (paletteOpen = false)} />
+{/if}
 {#if settingsOpen}
   <SettingsDialog onClose={() => (settingsOpen = false)} />
 {/if}
@@ -754,7 +950,69 @@
   }
   .pane {
     position: absolute;
-    inset: 0;
+    overflow: hidden;
+  }
+  .pane.split {
+    /* Bölücü için boşluk */
+    border: 1px solid transparent;
+  }
+  .pane.focused {
+    border-color: rgb(127 209 185 / 0.35);
+  }
+  .pane.broadcast {
+    border: 1px solid rgb(229 192 123 / 0.55);
+  }
+  .pane.broadcast.focused {
+    border-color: var(--warn);
+  }
+  .tool.warn {
+    background: rgb(229 192 123 / 0.16);
+  }
+  .tool.warn :global(svg) {
+    color: var(--warn);
+  }
+  .divider {
+    position: absolute;
+    z-index: 4;
+  }
+  .divider.row {
+    width: 7px;
+    margin-left: -3px;
+    cursor: col-resize;
+  }
+  .divider.col {
+    height: 7px;
+    margin-top: -3px;
+    cursor: row-resize;
+  }
+  .divider::after {
+    content: "";
+    position: absolute;
+    background: var(--border);
+  }
+  .divider.row::after {
+    left: 3px;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+  }
+  .divider.col::after {
+    top: 3px;
+    left: 0;
+    right: 0;
+    height: 1px;
+  }
+  .divider:hover::after {
+    background: var(--accent);
+  }
+  .tab .count {
+    min-width: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--border);
+    color: var(--text);
+    font-size: 10px;
+    text-align: center;
   }
   .sftp-pane {
     position: absolute;

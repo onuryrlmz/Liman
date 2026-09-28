@@ -32,6 +32,14 @@ export interface ConnectRequest {
   jump?: string | null;
 }
 
+export interface Snippet {
+  id: string;
+  name: string;
+  command: string;
+  /** Gönderdikten sonra Enter'a basılsın mı? */
+  run: boolean;
+}
+
 export interface HostKeyQuestion {
   id: string;
   host: string;
@@ -85,6 +93,7 @@ export interface ImportResult {
   secrets: number;
   keys: number;
   groups: number;
+  snippets?: number;
 }
 
 export interface BackupFileInfo {
@@ -105,10 +114,13 @@ function dataChannel(onData: (d: Uint8Array) => void) {
 
 export const api = {
   localShells: () => invoke<string[]>("local_shells"),
-  localSpawn: (shell: string | null, cols: number, rows: number, onData: (d: Uint8Array) => void) =>
-    invoke<string>("local_spawn", { shell, cols, rows, onData: dataChannel(onData) }),
-  sshConnect: (req: ConnectRequest, cols: number, rows: number, onData: (d: Uint8Array) => void) =>
-    invoke<string>("ssh_connect", { req, cols, rows, onData: dataChannel(onData) }),
+  localSpawn: (shell: string | null, cols: number, rows: number, onData: (d: Uint8Array) => void, logName: string) =>
+    invoke<string>("local_spawn", { shell, cols, rows, onData: dataChannel(onData), logName }),
+  sshConnect: (req: ConnectRequest, cols: number, rows: number, onData: (d: Uint8Array) => void, logName: string) =>
+    invoke<string>("ssh_connect", { req, cols, rows, onData: dataChannel(onData), logName }),
+  sshShare: (source: string, cols: number, rows: number, onData: (d: Uint8Array) => void, logName: string) =>
+    invoke<string>("ssh_share", { source, cols, rows, onData: dataChannel(onData), logName }),
+  logDefaultDir: () => invoke<string>("log_default_dir"),
   termWrite: (id: string, data: string) => invoke<void>("term_write", { id, data }),
   termResize: (id: string, cols: number, rows: number) => invoke<void>("term_resize", { id, cols, rows }),
   termClose: (id: string) => invoke<void>("term_close", { id }),
@@ -128,6 +140,8 @@ export const api = {
   importPreview: (source: "ssh-config" | "mobaxterm", path: string | null) =>
     invoke<ImportPreview>("import_preview", { source, path }),
   importSessions: (sessions: Session[]) => invoke<{ added: number; skipped: number }>("import_sessions", { sessions }),
+  snippetsList: () => invoke<Snippet[]>("snippets_list"),
+  snippetsSave: (snippets: Snippet[]) => invoke<void>("snippets_save", { snippets }),
   settingsGet: () => invoke<Record<string, unknown>>("settings_get"),
   settingsSet: (value: Record<string, unknown>) => invoke<void>("settings_set", { value }),
   sessionsImport: (path: string, password: string | null) => invoke<ImportResult>("sessions_import", { path, password }),

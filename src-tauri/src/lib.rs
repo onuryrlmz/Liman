@@ -1,6 +1,7 @@
 mod backup;
 mod importers;
 mod local;
+mod logger;
 mod sftp;
 mod ssh;
 mod store;
@@ -47,8 +48,13 @@ struct ExitPayload {
     code: Option<u32>,
 }
 
-fn sink(ch: Channel<InvokeResponseBody>) -> ssh::Sink {
+/// Terminal çıktısı: arayüze gider, oturum kaydı açıksa dosyaya da yazılır.
+fn sink(ch: Channel<InvokeResponseBody>, log_name: Option<&str>) -> ssh::Sink {
+    let log = log_name.and_then(logger::SessionLog::open);
     Arc::new(move |d| {
+        if let Some(l) = &log {
+            l.write(&d);
+        }
         let _ = ch.send(InvokeResponseBody::Raw(d));
     })
 }
@@ -80,9 +86,11 @@ fn local_spawn(
     cols: u16,
     rows: u16,
     on_data: Channel<InvokeResponseBody>,
+    log_name: Option<String>,
 ) -> CmdResult<String> {
     let id = uuid::Uuid::new_v4().to_string();
-    let term = local::spawn(shell, cols, rows, sink(on_data), on_exit(app, id.clone())).map_err(err)?;
+    let out = sink(on_data, log_name.as_deref());
+    let term = local::spawn(shell, cols, rows, out, on_exit(app, id.clone())).map_err(err)?;
     state
         .terms
         .lock()
@@ -198,6 +206,7 @@ async fn ssh_connect(
     cols: u32,
     rows: u32,
     on_data: Channel<InvokeResponseBody>,
+    log_name: Option<String>,
 ) -> CmdResult<String> {
     let typed_secret = req.secret.clone().filter(|s| !s.is_empty());
     let secret = typed_secret.clone().or_else(|| {
@@ -220,7 +229,8 @@ async fn ssh_connect(
     };
     let id = uuid::Uuid::new_v4().to_string();
     let ask = host_key_asker(app.clone(), state.host_key_questions.clone());
-    let term = ssh::connect(params, cols, rows, sink(on_data), ask, on_exit(app, id.clone()))
+    let out = sink(on_data, log_name.as_deref());
+    let term = ssh::connect(params, cols, rows, out, ask, on_exit(app, id.clone()))
         .await
         .map_err(err)?;
     if let (true, Some(sid), Some(s)) = (req.save_secret, &req.session_id, &typed_secret) {
@@ -228,6 +238,30 @@ async fn ssh_connect(
             let _ = store::mark_secret_saved(sid);
         }
     }
+    state.terms.lock().unwrap().insert(id.clone(), Term::Ssh(term));
+    Ok(id)
+}
+
+/// Açık bir SSH bağlantısı üzerinde yeni bir kabuk açar (bölünmüş pano).
+#[tauri::command]
+async fn ssh_share(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    source: String,
+    cols: u32,
+    rows: u32,
+    on_data: Channel<InvokeResponseBody>,
+    log_name: Option<String>,
+) -> CmdResult<String> {
+    let conn = state.conn(&source)?;
+    if conn.is_closed() {
+        return Err("Kaynak bağlantı kapalı".into());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let term = conn
+        .open_shell(cols, rows, sink(on_data, log_name.as_deref()), on_exit(app, id.clone()))
+        .await
+        .map_err(err)?;
     state.terms.lock().unwrap().insert(id.clone(), Term::Ssh(term));
     Ok(id)
 }
@@ -260,7 +294,16 @@ async fn term_close(state: State<'_, AppState>, id: String) -> CmdResult<()> {
         Some(Term::Local(mut t)) => t.kill(),
         Some(Term::Ssh(t)) => {
             let _ = t.send(ssh::SshInput::Close);
-            t.conn.disconnect().await;
+            // Bağlantıyı paylaşan başka pano yoksa kapat.
+            let shared = state
+                .terms
+                .lock()
+                .unwrap()
+                .values()
+                .any(|x| matches!(x, Term::Ssh(o) if Arc::ptr_eq(&o.conn, &t.conn)));
+            if !shared {
+                t.conn.disconnect().await;
+            }
         }
         None => {}
     }
@@ -322,6 +365,21 @@ async fn sessions_export(
     .await
     .map_err(err)?
     .map_err(err)
+}
+
+#[tauri::command]
+fn log_default_dir() -> String {
+    logger::default_dir().to_string_lossy().into_owned()
+}
+
+#[tauri::command]
+fn snippets_list() -> Vec<store::Snippet> {
+    store::load_snippets()
+}
+
+#[tauri::command]
+fn snippets_save(snippets: Vec<store::Snippet>) -> CmdResult<()> {
+    store::save_snippets(&snippets).map_err(err)
 }
 
 #[tauri::command]
@@ -510,6 +568,7 @@ pub fn run() {
             local_spawn,
             ssh_connect,
             host_key_answer,
+            ssh_share,
             term_write,
             term_resize,
             term_close,
@@ -526,6 +585,9 @@ pub fn run() {
             sessions_import,
             import_preview,
             settings_get,
+            snippets_list,
+            log_default_dir,
+            snippets_save,
             settings_set,
             import_sessions,
             sftp_home,

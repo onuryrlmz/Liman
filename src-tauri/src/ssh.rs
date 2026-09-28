@@ -391,7 +391,15 @@ pub async fn connect(
     if !p.shell {
         // SFTP alt sistemi yoksa bağlantı hatası olarak göster.
         conn.sftp().await?;
-        let weak = Arc::downgrade(&conn);
+        return Ok(conn.watch(on_exit));
+    }
+    conn.open_shell(cols, rows, out, on_exit).await
+}
+
+impl SshConn {
+    /// Kabuksuz (yalnızca SFTP) kullanım: bağlantı koptuğunda haber verir.
+    pub fn watch(self: &Arc<Self>, on_exit: OnExit) -> SshTerm {
+        let weak = Arc::downgrade(self);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -404,55 +412,73 @@ pub async fn connect(
             }
             on_exit(None);
         });
-        return Ok(SshTerm { tx: None, conn });
+        SshTerm {
+            tx: None,
+            conn: self.clone(),
+        }
     }
 
-    let channel = conn.handle.channel_open_session().await?;
-    channel
-        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
-        .await?;
-    channel.request_shell(false).await?;
-    let (mut read, write) = channel.split();
+    /// Bu bağlantı üzerinde yeni bir etkileşimli kabuk kanalı açar. Bölünmüş panolar
+    /// aynı bağlantıyı paylaşır; yeniden kimlik doğrulama gerekmez.
+    pub async fn open_shell(
+        self: &Arc<Self>,
+        cols: u32,
+        rows: u32,
+        out: Sink,
+        on_exit: OnExit,
+    ) -> Result<SshTerm> {
+        let channel = self.handle.channel_open_session().await?;
+        channel
+            .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
+            .await?;
+        channel.request_shell(false).await?;
+        let (mut read, write) = channel.split();
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<SshInput>();
-    tokio::spawn(async move {
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                SshInput::Data(d) => {
-                    if write.data_bytes(d).await.is_err() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<SshInput>();
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    SshInput::Data(d) => {
+                        if write.data_bytes(d).await.is_err() {
+                            break;
+                        }
+                    }
+                    SshInput::Resize(c, r) => {
+                        let _ = write.window_change(c, r, 0, 0).await;
+                    }
+                    SshInput::Close => {
+                        let _ = write.close().await;
                         break;
                     }
                 }
-                SshInput::Resize(c, r) => {
-                    let _ = write.window_change(c, r, 0, 0).await;
-                }
-                SshInput::Close => {
-                    let _ = write.close().await;
-                    break;
+            }
+        });
+
+        tokio::spawn(async move {
+            let mut code = None;
+            while let Some(msg) = read.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                        out(data.to_vec());
+                    }
+                    ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
+                    ChannelMsg::Close => break,
+                    _ => {}
                 }
             }
-        }
-    });
+            on_exit(code);
+        });
 
-    tokio::spawn(async move {
-        let mut code = None;
-        while let Some(msg) = read.wait().await {
-            match msg {
-                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                    out(data.to_vec());
-                }
-                ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
-                ChannelMsg::Close => break,
-                _ => {}
-            }
-        }
-        on_exit(code);
-    });
+        Ok(SshTerm {
+            tx: Some(tx),
+            conn: self.clone(),
+        })
+    }
 
-    Ok(SshTerm { tx: Some(tx), conn })
-}
+    pub fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
 
-impl SshConn {
     pub async fn sftp(&self) -> Result<&SftpSession> {
         self.sftp
             .get_or_try_init(|| async {

@@ -37,6 +37,8 @@ struct ExportedSession {
 struct Payload {
     groups: Vec<String>,
     sessions: Vec<ExportedSession>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    snippets: Vec<store::Snippet>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,6 +83,7 @@ pub struct ImportResult {
     pub secrets: usize,
     pub keys: usize,
     pub groups: usize,
+    pub snippets: usize,
 }
 
 #[derive(Serialize)]
@@ -167,6 +170,8 @@ pub fn export(path: &Path, password: Option<&str>, group: Option<&str>) -> Resul
     let payload = Payload {
         groups,
         sessions: exported,
+        // Parçacıklar yalnızca tam yedekte (grup seçilmemişken) taşınır.
+        snippets: if group.is_none() { store::load_snippets() } else { vec![] },
     };
 
     let mut env = Envelope {
@@ -265,6 +270,7 @@ pub fn import(path: &Path, password: Option<&str>) -> Result<ImportResult> {
         secrets: 0,
         keys: 0,
         groups: 0,
+        snippets: 0,
     };
 
     for e in payload.sessions {
@@ -308,6 +314,18 @@ pub fn import(path: &Path, password: Option<&str>) -> Result<ImportResult> {
             groups.push(g);
             res.groups += 1;
         }
+    }
+    // Parçacıklar: aynı kimlik güncellenir, yeniler eklenir.
+    if !payload.snippets.is_empty() {
+        let mut snippets = store::load_snippets();
+        for sn in payload.snippets {
+            match snippets.iter_mut().find(|x| x.id == sn.id) {
+                Some(x) => *x = sn,
+                None => snippets.push(sn),
+            }
+            res.snippets += 1;
+        }
+        store::save_snippets(&snippets)?;
     }
     store::write_sessions(&sessions)?;
     store::write_groups(&groups)?;

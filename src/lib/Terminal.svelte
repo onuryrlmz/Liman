@@ -11,13 +11,23 @@
   import Icon from "./Icon.svelte";
   import { api, errText, AUTH_FAILED, HOST_KEY_REJECTED, type ConnectRequest } from "./api";
   import { settings } from "./settings.svelte";
-  import type { Tab, TabPatch } from "./tabs.svelte";
+  import { store, type Tab, type TabPatch } from "./tabs.svelte";
 
   let {
     tab,
-    active,
+    visible,
+    focused,
     onUpdate,
-  }: { tab: Tab; active: boolean; onUpdate: (patch: TabPatch) => void } = $props();
+    onFocus,
+  }: {
+    tab: Tab;
+    /** Panonun sekmesi etkin mi? */
+    visible: boolean;
+    /** Klavye odağı bu panoda mı? */
+    focused: boolean;
+    onUpdate: (patch: TabPatch) => void;
+    onFocus: () => void;
+  } = $props();
 
   let el: HTMLDivElement;
   let term: Terminal;
@@ -79,7 +89,9 @@
     const { cols, rows } = term;
     try {
       if (tab.kind === "local") {
-        termId = await api.localSpawn(tab.shell ?? null, cols, rows, write);
+        termId = await api.localSpawn(tab.shell ?? null, cols, rows, write, tab.title);
+      } else if (tab.shareFrom && (await shareConnection(cols, rows))) {
+        // Bölünmüş pano: açık bağlantı üzerinde yeni kabuk açıldı.
       } else {
         const req: ConnectRequest = { ...tab.connect!, secret: lastReq?.secret ?? tab.connect!.secret };
         if (!req.username) {
@@ -98,7 +110,7 @@
           const via = req.jump ? " (atlama sunucusu üzerinden)" : "";
           info(`${req.sftpOnly ? "SFTP: " : ""}${req.username}@${req.host}:${req.port} adresine bağlanılıyor${via}...`);
           try {
-            termId = await api.sshConnect(req, cols, rows, write);
+            termId = await api.sshConnect(req, cols, rows, write, tab.title);
             break;
           } catch (e) {
             const msg = errText(e);
@@ -133,6 +145,19 @@
             ? "Sunucu anahtarı onaylanmadı, bağlantı kurulmadı."
             : msg,
       );
+    }
+  }
+
+  async function shareConnection(cols: number, rows: number) {
+    const source = tab.shareFrom!;
+    // Bir kez denenir; kopunca normal bağlantıyla yeniden kurulur.
+    onUpdate({ shareFrom: null });
+    try {
+      termId = await api.sshShare(source, cols, rows, write, tab.title);
+      lastReq = { ...tab.connect!, saveSecret: false };
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -293,7 +318,12 @@
 
     term.onData((d) => {
       if (reader) return feedReader(d);
-      if (termId) return void api.termWrite(termId, d);
+      if (termId) {
+        api.termWrite(termId, d);
+        // MultiExec: yalnızca kullanıcının yazdığı panodan diğerlerine.
+        for (const id of store.broadcastTargets(tab.key)) api.termWrite(id, d);
+        return;
+      }
       if (reconnectTimer) {
         if (d === "\x1b" || d === "\x03") {
           cancelReconnect();
@@ -363,9 +393,13 @@
   });
 
   $effect(() => {
-    if (active && term) {
+    if (visible && term) requestAnimationFrame(scheduleResize);
+  });
+
+  $effect(() => {
+    store.focusRequest;
+    if (visible && focused && term) {
       requestAnimationFrame(() => {
-        scheduleResize();
         if (!searchOpen) term.focus();
       });
     }
@@ -380,7 +414,8 @@
   });
 </script>
 
-<div class="wrap" style:background={bg}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="wrap" style:background={bg} onfocusin={onFocus} onmousedown={onFocus}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="term"

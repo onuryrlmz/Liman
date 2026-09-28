@@ -152,6 +152,10 @@ export interface Settings {
   rightClickPaste: boolean;
   autoReconnect: boolean;
   checkUpdates: boolean;
+  /** Terminal çıktısını düz metin dosyasına yaz (Rust tarafı okur). */
+  sessionLog: boolean;
+  logDir: string;
+  logTimestamps: boolean;
 }
 
 export const defaults: Settings = {
@@ -166,6 +170,9 @@ export const defaults: Settings = {
   rightClickPaste: true,
   autoReconnect: true,
   checkUpdates: true,
+  sessionLog: false,
+  logDir: "",
+  logTimestamps: true,
 };
 
 export const MIN_FONT = 8;
