@@ -2,7 +2,9 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
     path::Path,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -10,12 +12,19 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use russh::{
     client::{self, KeyboardInteractiveAuthResponse},
-    keys::{self, HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate},
+    keys::{
+        self,
+        agent::{client::AgentClient, AgentIdentity},
+        HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate,
+    },
     ChannelMsg, Disconnect,
 };
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
-use tokio::sync::{mpsc, OnceCell};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    sync::{mpsc, oneshot, OnceCell},
+};
 
 use crate::store;
 
@@ -35,6 +44,8 @@ pub struct ConnectParams {
     pub secret: Option<String>,
     /// false: kabuk açmadan yalnızca SFTP.
     pub shell: bool,
+    /// Önce bağlanılacak atlama sunucusu (ProxyJump).
+    pub jump: Option<Box<ConnectParams>>,
 }
 
 pub enum SshInput {
@@ -59,6 +70,8 @@ struct Tunnel {
 
 pub struct SshConn {
     handle: client::Handle<Client>,
+    /// Atlama sunucusu bağlantıları (hedefe yakın olan sonda).
+    jumps: Vec<client::Handle<Client>>,
     sftp: OnceCell<SftpSession>,
     tunnels: Mutex<HashMap<String, Tunnel>>,
 }
@@ -78,10 +91,28 @@ impl SshTerm {
     }
 }
 
+/// Bilinmeyen ya da değişmiş bir sunucu anahtarı için kullanıcıya sorulan soru.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HostKeyQuestion {
+    pub host: String,
+    pub port: u16,
+    pub algorithm: String,
+    pub fingerprint: String,
+    /// Daha önce farklı bir anahtar kaydedilmiş (olası saldırı).
+    pub changed: bool,
+}
+
+/// Soruyu arayüze iletir; cevap `true` ise anahtara güvenilir.
+pub type AskHostKey = Arc<dyn Fn(HostKeyQuestion) -> oneshot::Receiver<bool> + Send + Sync>;
+
+pub const HOST_KEY_REJECTED: &str = "HOST_KEY_REJECTED";
+
 pub struct Client {
     host: String,
     port: u16,
     out: Sink,
+    ask: AskHostKey,
 }
 
 impl client::Handler for Client {
@@ -96,32 +127,46 @@ impl client::Handler for Client {
             }
         };
         let ours = store::known_hosts_path();
-        let user = keys::check_known_hosts(&self.host, self.port, &pk);
+        // Uygulamanın dosyası önce gelir: kullanıcının burada onayladığı yeni anahtar,
+        // ~/.ssh/known_hosts'taki eski kaydın önüne geçer.
         let app = keys::check_known_hosts_path(&self.host, self.port, &pk, &ours);
-        match (user, app) {
-            (Err(keys::Error::KeyChanged { line }), _) => bail!(
-                "UYARI: {} sunucusunun anahtarı değişmiş (~/.ssh/known_hosts satır {line}). \
-                 Ortadaki adam saldırısı olabilir, bağlantı reddedildi.",
-                self.host
-            ),
-            (_, Err(keys::Error::KeyChanged { line })) => bail!(
-                "UYARI: {} sunucusunun anahtarı değişmiş ({} satır {line}). Bağlantı reddedildi.",
-                self.host,
-                ours.display()
-            ),
-            (Ok(true), _) | (_, Ok(true)) => Ok(true),
-            _ => {
-                keys::known_hosts::learn_known_hosts_path(&self.host, self.port, &pk, &ours)
-                    .context("known_hosts dosyasına yazılamadı")?;
-                let msg = format!(
-                    "\x1b[33mYeni sunucu anahtarı kaydedildi: {} {}\x1b[0m\r\n",
-                    pk.algorithm().as_str(),
-                    pk.fingerprint(HashAlg::Sha256)
-                );
-                (self.out)(msg.into_bytes());
-                Ok(true)
-            }
+        if matches!(app, Ok(true)) {
+            return Ok(true);
         }
+        let user = keys::check_known_hosts(&self.host, self.port, &pk);
+        if matches!(user, Ok(true)) {
+            return Ok(true);
+        }
+        let changed = matches!(app, Err(keys::Error::KeyChanged { .. }))
+            || matches!(user, Err(keys::Error::KeyChanged { .. }));
+
+        let question = HostKeyQuestion {
+            host: self.host.clone(),
+            port: self.port,
+            algorithm: pk.algorithm().as_str().to_string(),
+            fingerprint: pk.fingerprint(HashAlg::Sha256).to_string(),
+            changed,
+        };
+        let answer = tokio::time::timeout(Duration::from_secs(600), (self.ask)(question))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false);
+        if !answer {
+            bail!(HOST_KEY_REJECTED);
+        }
+        if changed {
+            store::forget_host_key(&self.host, self.port)?;
+        }
+        keys::known_hosts::learn_known_hosts_path(&self.host, self.port, &pk, &ours)
+            .context("known_hosts dosyasına yazılamadı")?;
+        let msg = format!(
+            "\x1b[33mSunucu anahtarı kaydedildi: {} {}\x1b[0m\r\n",
+            pk.algorithm().as_str(),
+            pk.fingerprint(HashAlg::Sha256)
+        );
+        (self.out)(msg.into_bytes());
+        Ok(true)
     }
 }
 
@@ -131,6 +176,58 @@ async fn try_key(h: &mut client::Handle<Client>, user: &str, key: keys::PrivateK
         .authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash))
         .await?;
     Ok(res.success())
+}
+
+async fn try_agent_with<S>(
+    h: &mut client::Handle<Client>,
+    user: &str,
+    mut agent: AgentClient<S>,
+) -> Result<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let Ok(identities) = agent.request_identities().await else {
+        return Ok(false);
+    };
+    for id in identities {
+        let AgentIdentity::PublicKey { key, .. } = id else {
+            continue;
+        };
+        let hash = if key.algorithm().is_rsa() {
+            h.best_supported_rsa_hash().await?.flatten()
+        } else {
+            None
+        };
+        if let Ok(res) = h
+            .authenticate_publickey_with(user, key, hash, &mut agent)
+            .await
+        {
+            if res.success() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// ssh-agent (macOS/Linux: SSH_AUTH_SOCK, Windows: OpenSSH agent ya da Pageant).
+async fn try_agent(h: &mut client::Handle<Client>, user: &str) -> Result<bool> {
+    #[cfg(unix)]
+    if let Ok(agent) = AgentClient::connect_env().await {
+        return try_agent_with(h, user, agent).await;
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(agent) = AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
+            if try_agent_with(h, user, agent).await? {
+                return Ok(true);
+            }
+        }
+        if let Ok(agent) = AgentClient::connect_pageant().await {
+            return try_agent_with(h, user, agent).await;
+        }
+    }
+    Ok(false)
 }
 
 async fn try_password(h: &mut client::Handle<Client>, user: &str, pw: &str) -> Result<bool> {
@@ -172,6 +269,9 @@ async fn authenticate(h: &mut client::Handle<Client>, p: &ConnectParams) -> Resu
             None => Ok(false),
         },
         store::AuthKind::Auto => {
+            if try_agent(h, user).await? {
+                return Ok(true);
+            }
             if let Some(ssh_dir) = dirs::home_dir().map(|h| h.join(".ssh")) {
                 for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
                     let path = ssh_dir.join(name);
@@ -193,36 +293,97 @@ async fn authenticate(h: &mut client::Handle<Client>, p: &ConnectParams) -> Resu
     }
 }
 
+type Handle = client::Handle<Client>;
+
+/// Bağlanır ve kimlik doğrular. Atlama sunucusu varsa önce ona bağlanıp hedefe
+/// onun üzerinden tünel açar; ara bağlantılar açık kalsın diye birlikte döner.
+fn open<'a>(
+    p: &'a ConnectParams,
+    out: &'a Sink,
+    ask: &'a AskHostKey,
+    depth: usize,
+) -> Pin<Box<dyn Future<Output = Result<(Handle, Vec<Handle>)>> + Send + 'a>> {
+    Box::pin(async move {
+        if depth > 5 {
+            bail!("Atlama sunucusu zinciri çok uzun (döngü olabilir)");
+        }
+        let config = Arc::new(client::Config {
+            keepalive_interval: Some(Duration::from_secs(15)),
+            keepalive_max: 3,
+            inactivity_timeout: None,
+            ..Default::default()
+        });
+        let handler = Client {
+            host: p.host.clone(),
+            port: p.port,
+            out: out.clone(),
+            ask: ask.clone(),
+        };
+        let timeout = |_| anyhow!("{}:{} bağlantısı zaman aşımına uğradı", p.host, p.port);
+        let (mut handle, chain) = match &p.jump {
+            Some(jump) => {
+                let (jh, mut chain) = open(jump, out, ask, depth + 1).await.map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.contains(AUTH_FAILED) {
+                        anyhow!(
+                            "Atlama sunucusunda kimlik doğrulama başarısız: {}@{}",
+                            jump.username,
+                            jump.host
+                        )
+                    } else {
+                        e
+                    }
+                })?;
+                out(format!(
+                    "\x1b[90m{} üzerinden {}:{} adresine geçiliyor...\x1b[0m\r\n",
+                    jump.host, p.host, p.port
+                )
+                .into_bytes());
+                let ch = jh
+                    .channel_open_direct_tcpip(p.host.clone(), p.port as u32, "127.0.0.1", 0)
+                    .await
+                    .with_context(|| {
+                        format!("{} üzerinden {}:{} adresine ulaşılamadı", jump.host, p.host, p.port)
+                    })?;
+                let h = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    client::connect_stream(config, ch.into_stream(), handler),
+                )
+                .await
+                .map_err(timeout)??;
+                chain.push(jh);
+                (h, chain)
+            }
+            None => {
+                let h = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    client::connect(config, (p.host.as_str(), p.port), handler),
+                )
+                .await
+                .map_err(timeout)??;
+                (h, Vec::new())
+            }
+        };
+        if !authenticate(&mut handle, p).await? {
+            bail!(AUTH_FAILED);
+        }
+        Ok((handle, chain))
+    })
+}
+
 pub async fn connect(
     p: ConnectParams,
     cols: u32,
     rows: u32,
     out: Sink,
+    ask: AskHostKey,
     on_exit: OnExit,
 ) -> Result<SshTerm> {
-    let config = Arc::new(client::Config {
-        keepalive_interval: Some(Duration::from_secs(30)),
-        inactivity_timeout: None,
-        ..Default::default()
-    });
-    let handler = Client {
-        host: p.host.clone(),
-        port: p.port,
-        out: out.clone(),
-    };
-    let mut handle = tokio::time::timeout(
-        Duration::from_secs(20),
-        client::connect(config, (p.host.as_str(), p.port), handler),
-    )
-    .await
-    .map_err(|_| anyhow!("{}:{} bağlantısı zaman aşımına uğradı", p.host, p.port))??;
-
-    if !authenticate(&mut handle, &p).await? {
-        bail!(AUTH_FAILED);
-    }
+    let (handle, jumps) = open(&p, &out, &ask, 0).await?;
 
     let conn = Arc::new(SshConn {
         handle,
+        jumps,
         sftp: OnceCell::new(),
         tunnels: Mutex::new(HashMap::new()),
     });
@@ -313,6 +474,9 @@ impl SshConn {
             .handle
             .disconnect(Disconnect::ByApplication, "", "en")
             .await;
+        for j in self.jumps.iter().rev() {
+            let _ = j.disconnect(Disconnect::ByApplication, "", "en").await;
+        }
     }
 
     pub async fn start_tunnel(

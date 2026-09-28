@@ -14,6 +14,8 @@ export interface Session {
   folder?: string | null;
   hasSecret?: boolean;
   kind?: SessionKind;
+  /** Atlama sunucusu: kayıtlı oturum kimliği ya da "kullanıcı@sunucu:port". */
+  jump?: string | null;
 }
 
 export interface ConnectRequest {
@@ -27,6 +29,21 @@ export interface ConnectRequest {
   saveSecret?: boolean;
   /** Kabuk açmadan yalnızca SFTP. */
   sftpOnly?: boolean;
+  jump?: string | null;
+}
+
+export interface HostKeyQuestion {
+  id: string;
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprint: string;
+  changed: boolean;
+}
+
+export interface ImportPreview {
+  sessions: Session[];
+  unsupported: number;
 }
 
 export interface Entry {
@@ -76,6 +93,7 @@ export interface BackupFileInfo {
 }
 
 export const AUTH_FAILED = "AUTH_FAILED";
+export const HOST_KEY_REJECTED = "HOST_KEY_REJECTED";
 export const PASSWORD_REQUIRED = "PASSWORD_REQUIRED";
 export const WRONG_PASSWORD = "WRONG_PASSWORD";
 
@@ -106,6 +124,12 @@ export const api = {
   sessionsExport: (path: string, password: string | null, group: string | null) =>
     invoke<ExportResult>("sessions_export", { path, password, group }),
   sessionsImportInfo: (path: string) => invoke<BackupFileInfo>("sessions_import_info", { path }),
+  hostKeyAnswer: (id: string, accept: boolean) => invoke<void>("host_key_answer", { id, accept }),
+  importPreview: (source: "ssh-config" | "mobaxterm", path: string | null) =>
+    invoke<ImportPreview>("import_preview", { source, path }),
+  importSessions: (sessions: Session[]) => invoke<{ added: number; skipped: number }>("import_sessions", { sessions }),
+  settingsGet: () => invoke<Record<string, unknown>>("settings_get"),
+  settingsSet: (value: Record<string, unknown>) => invoke<void>("settings_set", { value }),
   sessionsImport: (path: string, password: string | null) => invoke<ImportResult>("sessions_import", { path, password }),
 
   sftpHome: (id: string) => invoke<string>("sftp_home", { id }),

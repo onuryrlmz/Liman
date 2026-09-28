@@ -51,6 +51,9 @@ pub struct Session {
     pub has_secret: bool,
     #[serde(default)]
     pub kind: SessionKind,
+    /// Atlama sunucusu: kayıtlı bir oturumun kimliği ya da "kullanıcı@sunucu:port".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jump: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -99,6 +102,28 @@ pub fn known_hosts_path() -> PathBuf {
     config_dir().join("known_hosts")
 }
 
+/// Uygulamanın known_hosts dosyasından bu sunucunun kayıtlarını siler.
+pub fn forget_host_key(host: &str, port: u16) -> Result<()> {
+    let path = known_hosts_path();
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let pattern = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            let hosts = l.split_whitespace().next().unwrap_or("");
+            !hosts.split(',').any(|h| h == pattern)
+        })
+        .collect();
+    fs::write(&path, kept.join("\n") + "\n")?;
+    Ok(())
+}
+
 pub fn load_sessions() -> Result<Vec<Session>> {
     let path = sessions_path();
     if !path.exists() {
@@ -113,6 +138,20 @@ fn write_json<T: Serialize + ?Sized>(path: PathBuf, value: &T) -> Result<()> {
     fs::write(&tmp, serde_json::to_string_pretty(value)?)?;
     fs::rename(tmp, path)?;
     Ok(())
+}
+
+// ---------- Ayarlar ----------
+// Arayüz ayarları; içeriğini arayüz belirler, burada yalnızca saklanır.
+
+pub fn load_settings() -> serde_json::Value {
+    fs::read_to_string(config_dir().join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+pub fn save_settings(value: &serde_json::Value) -> Result<()> {
+    write_json(config_dir().join("settings.json"), value)
 }
 
 pub(crate) fn write_sessions(sessions: &[Session]) -> Result<()> {

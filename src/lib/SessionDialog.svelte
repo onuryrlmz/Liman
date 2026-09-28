@@ -22,6 +22,13 @@
 
   const folders = $derived(store.groups);
 
+  // Atlama sunucusu: kayıtlı bir oturum ya da elle yazılan "kullanıcı@sunucu:port".
+  const jumpCandidates = $derived(store.sessions.filter((s) => s.id !== form.id && s.kind !== "sftp"));
+  let jumpMode = $state<string>(
+    !initial.jump ? "" : store.sessions.some((s) => s.id === initial.jump) ? initial.jump : "custom",
+  );
+  let jumpCustom = $state(jumpMode === "custom" ? (initial.jump ?? "") : "");
+
   async function pickKey() {
     const p = await open({ title: "Özel anahtar seç", multiple: false, directory: false });
     if (typeof p === "string") form.keyPath = p;
@@ -44,6 +51,7 @@
           folder: form.folder?.trim() || null,
           keyPath: form.keyPath?.trim() || null,
           port: Number(form.port) || 22,
+          jump: jumpMode === "custom" ? jumpCustom.trim() || null : jumpMode || null,
         },
         forget ? "" : secret ? secret : null,
       );
@@ -132,6 +140,23 @@
         {#each folders as f}<option value={f}></option>{/each}
       </datalist>
     </label>
+    <label class="full">
+      <span>Atlama sunucusu (ProxyJump)</span>
+      <select bind:value={jumpMode}>
+        <option value="">Yok, doğrudan bağlan</option>
+        {#each jumpCandidates as j (j.id)}
+          <option value={j.id}>{j.name} — {j.username ? j.username + "@" : ""}{j.host}</option>
+        {/each}
+        <option value="custom">Diğer (kullanıcı@sunucu:port)…</option>
+      </select>
+    </label>
+    {#if jumpMode === "custom"}
+      <label class="full">
+        <span>Atlama sunucusu adresi</span>
+        <input bind:value={jumpCustom} placeholder="ops@bastion.example.com:22  (zincir için virgülle ayırın)" spellcheck="false" />
+        <small>Bu sunucuya ssh-agent ya da ~/.ssh anahtarlarıyla bağlanılır. Parola gerekiyorsa onu ayrı bir oturum olarak kaydedip listeden seçin.</small>
+      </label>
+    {/if}
     {#if error}<p class="err full">{error}</p>{/if}
     <button type="submit" hidden aria-hidden="true"></button>
   </form>

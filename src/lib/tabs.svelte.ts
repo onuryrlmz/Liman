@@ -76,6 +76,7 @@ class Store {
         auth: s.auth,
         keyPath: s.keyPath,
         sftpOnly,
+        jump: s.jump,
       },
       s.name || s.host,
       s,

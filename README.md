@@ -12,8 +12,14 @@ Tauri 2 (Rust) + Svelte 5 + xterm.js.
   belirlenen parolayla şifrelenir (Argon2id + XChaCha20-Poly1305); tüm oturumlar ya da tek grup
 - SSH kimlik doğrulama: parola, keyboard-interactive, özel anahtar (parolalı da olur),
   otomatik (`~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`)
-- Host anahtarı doğrulama: `~/.ssh/known_hosts` ile uygulamanın kendi known_hosts dosyası;
-  anahtar değişmişse bağlantı reddedilir
+- Sunucu anahtarı onayı: yeni sunucuda parmak izi gösterilip onay istenir; anahtar değişmişse
+  açık bir uyarıyla sorulur (`~/.ssh/known_hosts` da okunur)
+- Atlama sunucusu (ProxyJump), zincir halinde de; kayıtlı bir oturum ya da `kullanıcı@sunucu:port`
+- ssh-agent desteği (macOS/Linux `SSH_AUTH_SOCK`, Windows OpenSSH agent ve Pageant)
+- İçe aktarma: `~/.ssh/config` ve MobaXterm (`.mxtsessions` / `MobaXterm.ini`)
+- Kopan bağlantılara otomatik yeniden bağlanma
+- Terminalde arama (⌘F / Ctrl+Shift+F), yakınlaştırma (⌘ + / − / 0), temalar ve yazı tipi ayarları
+- Otomatik güncelleme (GitHub Releases üzerinden, imzalı)
 - SSH bağlanınca otomatik açılan SFTP paneli: gezinme, yükleme/indirme (klasörler dahil,
   ilerleme göstergesiyle), sürükle-bırak yükleme, yeniden adlandırma, silme, yeni klasör,
   uzak dosyayı düzenleme
@@ -29,6 +35,9 @@ Tauri 2 (Rust) + Svelte 5 + xterm.js.
 | ⌘W | Ctrl+Shift+W | Sekmeyi kapat |
 | ⌘N | Ctrl+Shift+N | Yeni SSH oturumu |
 | ⌘B | Ctrl+Shift+B | Kenar çubuğunu aç/kapat |
+| ⌘F | Ctrl+Shift+F | Terminalde ara |
+| ⌘ + / − / 0 | Ctrl + / − / 0 | Yazıyı büyüt / küçült / sıfırla |
+| ⌘, | Ctrl+, | Ayarlar |
 | Ctrl+Tab | Ctrl+Tab | Sonraki sekme |
 | ⌘1…9 | | Sekmeye git |
 
@@ -49,6 +58,10 @@ Testler (SSH testleri için bir sshd gerekir, yoksa atlanır):
 cd src-tauri
 LIMAN_TEST_SSH="127.0.0.1:22:kullanici:/yol/ozel_anahtar" cargo test
 ```
+
+Yerel paket derlemesi güncelleme imzası ister:
+`TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/liman.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" npm run tauri build`.
+CI'da bu anahtar `TAURI_SIGNING_PRIVATE_KEY` secret'ında durur.
 
 Üç platformun paketleri `.github/workflows/build.yml` ile GitHub Actions'da üretilir
 (`v*` etiketi atınca taslak release oluşur).

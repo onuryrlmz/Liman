@@ -1,6 +1,6 @@
 [package]
 name = "liman"
-version = "0.3.0"
+version = "0.4.0"
 description = "SSH, SFTP ve yerel terminal istemcisi"
 authors = ["onuryrlmz"]
 edition = "2021"
@@ -36,6 +36,8 @@ tauri-plugin-clipboard-manager = "2.4.0"
 argon2 = "0.6.0"
 chacha20poly1305 = "0.11.0"
 getrandom = "0.4.3"
+tauri-plugin-updater = "2.13.0"
+tauri-plugin-process = "2.4.0"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

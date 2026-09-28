@@ -1,4 +1,5 @@
 mod backup;
+mod importers;
 mod local;
 mod sftp;
 mod ssh;
@@ -20,6 +21,8 @@ enum Term {
 #[derive(Default)]
 struct AppState {
     terms: Mutex<HashMap<String, Term>>,
+    /// Cevap bekleyen sunucu anahtarı soruları.
+    host_key_questions: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
 }
 
 impl AppState {
@@ -102,6 +105,89 @@ struct ConnectRequest {
     save_secret: bool,
     #[serde(default)]
     sftp_only: bool,
+    #[serde(default)]
+    jump: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct HostKeyEvent {
+    id: String,
+    #[serde(flatten)]
+    question: ssh::HostKeyQuestion,
+}
+
+fn host_key_asker(app: AppHandle, pending: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>) -> ssh::AskHostKey {
+    Arc::new(move |question| {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = uuid::Uuid::new_v4().to_string();
+        pending.lock().unwrap().insert(id.clone(), tx);
+        let _ = app.emit("host-key", HostKeyEvent { id, question });
+        rx
+    })
+}
+
+#[tauri::command]
+fn host_key_answer(state: State<'_, AppState>, id: String, accept: bool) {
+    if let Some(tx) = state.host_key_questions.lock().unwrap().remove(&id) {
+        let _ = tx.send(accept);
+    }
+}
+
+/// "kullanıcı@sunucu:port" ya da kayıtlı oturum kimliğinden atlama sunucusunu çözer.
+fn resolve_jump(spec: &str, depth: usize) -> Result<ssh::ConnectParams, String> {
+    if depth > 5 {
+        return Err("Atlama sunucusu zinciri çok uzun (döngü olabilir)".into());
+    }
+    // "a,b" zinciri: önce a'ya, onun üzerinden b'ye bağlanılır.
+    if let Some((first, last)) = spec.rsplit_once(',') {
+        let mut p = resolve_jump(last.trim(), depth + 1)?;
+        p.jump = Some(Box::new(resolve_jump(first.trim(), depth + 1)?));
+        return Ok(p);
+    }
+    let sessions = store::load_sessions().map_err(err)?;
+    if let Some(s) = sessions.iter().find(|s| s.id == spec) {
+        return Ok(ssh::ConnectParams {
+            host: s.host.clone(),
+            port: s.port,
+            username: s.username.clone(),
+            auth: s.auth,
+            key_path: s.key_path.clone(),
+            secret: store::get_secret(&s.id),
+            shell: false,
+            jump: match s.jump.as_deref().filter(|j| !j.is_empty()) {
+                Some(j) => Some(Box::new(resolve_jump(j, depth + 1)?)),
+                None => None,
+            },
+        });
+    }
+    let (user, rest) = match spec.rsplit_once('@') {
+        Some((u, r)) => (u.to_string(), r),
+        None => (whoami(), spec),
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse().map_err(|_| format!("Geçersiz port: {p}"))?),
+        None => (rest, 22),
+    };
+    if host.is_empty() {
+        return Err(format!("Geçersiz atlama sunucusu: {spec}"));
+    }
+    Ok(ssh::ConnectParams {
+        host: host.to_string(),
+        port,
+        username: user,
+        auth: store::AuthKind::Auto,
+        key_path: None,
+        secret: None,
+        shell: false,
+        jump: None,
+    })
+}
+
+fn whoami() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -127,9 +213,14 @@ async fn ssh_connect(
         key_path: req.key_path,
         secret,
         shell: !req.sftp_only,
+        jump: match req.jump.as_deref().map(str::trim).filter(|j| !j.is_empty()) {
+            Some(j) => Some(Box::new(resolve_jump(j, 0)?)),
+            None => None,
+        },
     };
     let id = uuid::Uuid::new_v4().to_string();
-    let term = ssh::connect(params, cols, rows, sink(on_data), on_exit(app, id.clone()))
+    let ask = host_key_asker(app.clone(), state.host_key_questions.clone());
+    let term = ssh::connect(params, cols, rows, sink(on_data), ask, on_exit(app, id.clone()))
         .await
         .map_err(err)?;
     if let (true, Some(sid), Some(s)) = (req.save_secret, &req.session_id, &typed_secret) {
@@ -231,6 +322,26 @@ async fn sessions_export(
     .await
     .map_err(err)?
     .map_err(err)
+}
+
+#[tauri::command]
+fn settings_get() -> serde_json::Value {
+    store::load_settings()
+}
+
+#[tauri::command]
+fn settings_set(value: serde_json::Value) -> CmdResult<()> {
+    store::save_settings(&value).map_err(err)
+}
+
+#[tauri::command]
+fn import_preview(source: String, path: Option<String>) -> CmdResult<importers::Preview> {
+    importers::preview(&source, path.as_deref().map(std::path::Path::new)).map_err(err)
+}
+
+#[tauri::command]
+fn import_sessions(sessions: Vec<store::Session>) -> CmdResult<importers::Imported> {
+    importers::import(sessions).map_err(err)
 }
 
 #[tauri::command]
@@ -391,11 +502,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             local_shells,
             local_spawn,
             ssh_connect,
+            host_key_answer,
             term_write,
             term_resize,
             term_close,
@@ -410,6 +524,10 @@ pub fn run() {
             sessions_export,
             sessions_import_info,
             sessions_import,
+            import_preview,
+            settings_get,
+            settings_set,
+            import_sessions,
             sftp_home,
             sftp_list,
             sftp_mkdir,

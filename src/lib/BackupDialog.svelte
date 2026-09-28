@@ -2,6 +2,7 @@
   import { open, save } from "@tauri-apps/plugin-dialog";
   import Modal from "./Modal.svelte";
   import Icon from "./Icon.svelte";
+  import ExternalImport from "./ExternalImport.svelte";
   import {
     api,
     errText,
@@ -75,6 +76,7 @@
   }
 
   // --- İçeri aktarma ---
+  let importSource = $state<"liman" | "ssh-config" | "mobaxterm">("liman");
   let file = $state<string | null>(null);
   let info = $state<BackupFileInfo | null>(null);
   let importPw = $state("");
@@ -182,6 +184,21 @@
       <button type="submit" hidden aria-hidden="true"></button>
     </form>
   {:else}
+    <div class="sources" role="radiogroup" aria-label="Kaynak">
+      {#each [["liman", "Liman dosyası"], ["ssh-config", "OpenSSH config"], ["mobaxterm", "MobaXterm"]] as [key, label]}
+        <button
+          role="radio"
+          aria-checked={importSource === key}
+          class:on={importSource === key}
+          onclick={() => ((importSource = key as typeof importSource), (error = ""))}>{label}</button
+        >
+      {/each}
+    </div>
+    {#if importSource !== "liman"}
+      {#key importSource}
+        <ExternalImport source={importSource} onDone={onClose} />
+      {/key}
+    {:else}
     <div class="form">
       <button class="file" onclick={pickFile}>
         <Icon name="file" size={18} />
@@ -223,6 +240,7 @@
       {/if}
       {#if error}<p class="err">{error}</p>{/if}
     </div>
+    {/if}
   {/if}
 
   {#snippet footer()}
@@ -231,6 +249,8 @@
       <button class="btn primary" disabled={!canExport || busy} onclick={doExport}>
         {busy ? "Şifreleniyor…" : `${scopeCount} oturumu dışarı aktar…`}
       </button>
+    {:else if importSource !== "liman"}
+      <button class="btn" onclick={onClose}>Kapat</button>
     {:else if result}
       <button class="btn primary" onclick={onClose}>Tamam</button>
     {:else}
@@ -269,6 +289,26 @@
   .tabs button.on {
     background: var(--panel-2);
     color: var(--text);
+  }
+  .sources {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+  .sources button {
+    padding: 5px 11px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .sources button.on {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-soft);
   }
   .form {
     display: flex;

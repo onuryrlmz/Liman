@@ -50,6 +50,23 @@ fn exit_signal() -> (ssh::OnExit, oneshot::Receiver<Option<u32>>) {
     )
 }
 
+/// Sunucu anahtarı sorularını kaydeder ve verilen cevabı döner.
+fn asker(answer: bool) -> (ssh::AskHostKey, Arc<Mutex<Vec<ssh::HostKeyQuestion>>>) {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let a = asked.clone();
+    let ask: ssh::AskHostKey = Arc::new(move |q| {
+        a.lock().unwrap().push(q);
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(answer);
+        rx
+    });
+    (ask, asked)
+}
+
+fn accept_all() -> ssh::AskHostKey {
+    asker(true).0
+}
+
 fn test_params(secret: Option<&str>) -> Option<ssh::ConnectParams> {
     let spec = std::env::var("LIMAN_TEST_SSH").ok()?;
     let mut it = spec.splitn(4, ':');
@@ -69,6 +86,7 @@ fn test_params(secret: Option<&str>) -> Option<ssh::ConnectParams> {
         key_path: Some(key),
         secret: secret.map(String::from),
         shell: true,
+        jump: None,
     })
 }
 
@@ -121,7 +139,7 @@ async fn ssh_shell_sftp_and_tunnel() {
     // --- Kabuk ---
     let (out, sink) = Output::new();
     let (on_exit, exited) = exit_signal();
-    let term = ssh::connect(params, 100, 30, sink, on_exit).await.unwrap();
+    let term = ssh::connect(params, 100, 30, sink, accept_all(), on_exit).await.unwrap();
     term
         .send(ssh::SshInput::Data(b"echo liman-$((40+2))\n".to_vec()))
         .unwrap();
@@ -245,7 +263,7 @@ async fn ssh_wrong_key_reports_auth_failed() {
     params.key_path = Some(path.to_string_lossy().into_owned());
     let (_out, sink) = Output::new();
     let (on_exit, _) = exit_signal();
-    let err = ssh::connect(params, 80, 24, sink, on_exit)
+    let err = ssh::connect(params, 80, 24, sink, accept_all(), on_exit)
         .await
         .err()
         .expect("yanlış anahtarla bağlanmamalıydı");
@@ -275,6 +293,7 @@ fn session(name: &str, folder: Option<&str>, auth: store::AuthKind) -> store::Se
         folder: folder.map(String::from),
         has_secret: false,
         kind: store::SessionKind::Ssh,
+        jump: None,
     }
 }
 
@@ -386,7 +405,7 @@ async fn sftp_only_connection() {
     params.shell = false;
     let (out, sink) = Output::new();
     let (on_exit, exited) = exit_signal();
-    let term = ssh::connect(params, 80, 24, sink, on_exit).await.unwrap();
+    let term = ssh::connect(params, 80, 24, sink, accept_all(), on_exit).await.unwrap();
     assert!(term.tx.is_none(), "yalnızca SFTP bağlantısında kabuk açılmamalı");
     // Kabuk girdisi sessizce yok sayılır.
     term.send(ssh::SshInput::Data(b"echo x\n".to_vec())).unwrap();
@@ -403,4 +422,162 @@ async fn sftp_only_connection() {
         .unwrap();
     assert_eq!(code, None);
     assert!(!out.text().contains("echo x"));
+}
+
+#[tokio::test]
+async fn host_key_is_confirmed_once_and_change_is_flagged() {
+    let Some(params) = test_params(None) else {
+        return;
+    };
+    let dir = fresh_config("hostkey");
+    let connect = |ask: ssh::AskHostKey| {
+        let p = test_params(None).unwrap();
+        let (_out, sink) = Output::new();
+        let (on_exit, _) = exit_signal();
+        async move { ssh::connect(p, 80, 24, sink, ask, on_exit).await }
+    };
+    drop(params);
+
+    // İlk bağlantıda sorulur; reddedilirse bağlanılmaz ve kayıt yapılmaz.
+    let (ask, asked) = asker(false);
+    let e = connect(ask).await.err().expect("reddedilen anahtarla bağlanmamalı");
+    assert!(format!("{e:#}").contains(ssh::HOST_KEY_REJECTED), "{e:#}");
+    let q = asked.lock().unwrap()[0].clone();
+    assert!(!q.changed && q.fingerprint.starts_with("SHA256:"));
+    assert!(!std::fs::read_to_string(dir.join("known_hosts")).unwrap_or_default().contains("2222"));
+
+    // Kabul edilince kaydedilir, sonraki bağlantıda sorulmaz.
+    let (ask, asked) = asker(true);
+    connect(ask).await.unwrap().conn.disconnect().await;
+    assert_eq!(asked.lock().unwrap().len(), 1);
+    let (ask, asked) = asker(true);
+    connect(ask).await.unwrap().conn.disconnect().await;
+    assert!(asked.lock().unwrap().is_empty(), "kayıtlı anahtar için tekrar sorulmamalı");
+
+    // Anahtar değişmişse "değişti" diye sorulur; kabul edilirse eski kayıt silinir.
+    let fake = "[127.0.0.1]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl\n";
+    std::fs::write(dir.join("known_hosts"), fake).unwrap();
+    let (ask, asked) = asker(false);
+    assert!(connect(ask).await.is_err());
+    assert!(asked.lock().unwrap()[0].changed);
+    let (ask, _) = asker(true);
+    connect(ask).await.unwrap().conn.disconnect().await;
+    let kh = std::fs::read_to_string(dir.join("known_hosts")).unwrap();
+    assert_eq!(kh.lines().filter(|l| l.contains("2222")).count(), 1);
+    assert!(!kh.contains("AAAAIOMqqnkVzrm0"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn connects_through_jump_host() {
+    let Some(jump) = test_params(None) else {
+        return;
+    };
+    let mut target = test_params(None).unwrap();
+    // Hedefe atlama sunucusunun gözünden "localhost" ile ulaşılır.
+    target.host = "localhost".into();
+    target.jump = Some(Box::new(jump));
+    let (out, sink) = Output::new();
+    let (on_exit, _) = exit_signal();
+    let term = ssh::connect(target, 80, 24, sink, accept_all(), on_exit).await.unwrap();
+    term.send(ssh::SshInput::Data(b"echo atlama-$((1+1))\n".to_vec())).unwrap();
+    out.wait_for("atlama-2").await;
+    assert!(out.text().contains("üzerinden localhost:2222"));
+    let s = term.conn.sftp().await.unwrap();
+    assert!(s.canonicalize(".").await.is_ok());
+    term.conn.disconnect().await;
+}
+
+/// LIMAN_TEST_AGENT=1 ile, SSH_AUTH_SOCK test anahtarını içeren bir ajanı gösterirken çalışır.
+#[tokio::test]
+async fn authenticates_with_ssh_agent() {
+    if std::env::var("LIMAN_TEST_AGENT").is_err() {
+        return;
+    }
+    let Some(mut params) = test_params(None) else {
+        return;
+    };
+    params.auth = store::AuthKind::Auto;
+    params.key_path = None;
+    let (_out, sink) = Output::new();
+    let (on_exit, _) = exit_signal();
+    let term = ssh::connect(params, 80, 24, sink, accept_all(), on_exit)
+        .await
+        .expect("ssh-agent ile giriş yapılamadı");
+    term.conn.disconnect().await;
+}
+
+#[test]
+fn parses_ssh_config() {
+    let cfg = r#"
+# genel
+User varsayilan
+
+Host bastion
+    HostName bastion.example.com
+    User ops
+    Port 2200
+
+Host web1 web2
+  HostName=10.0.0.5
+  ProxyJump bastion
+  IdentityFile ~/.ssh/id_web
+
+Host db
+    HostName db.internal
+    ProxyJump ops@bastion.example.com:2200,other
+    User "postgres"
+
+Host *.corp *
+    Port 2022
+    IdentityFile ~/.ssh/id_default
+
+Match host foo
+    User yoksay
+"#;
+    let p = crate::importers::parse_ssh_config(cfg);
+    let names: Vec<_> = p.sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["bastion", "web1", "web2", "db"]);
+    let get = |n: &str| p.sessions.iter().find(|s| s.name == n).unwrap();
+    let b = get("bastion");
+    assert_eq!((b.host.as_str(), b.port, b.username.as_str()), ("bastion.example.com", 2200, "ops"));
+    assert_eq!(b.key_path.as_deref(), Some("~/.ssh/id_default"));
+    let w = get("web2");
+    assert_eq!((w.host.as_str(), w.port, w.username.as_str()), ("10.0.0.5", 2022, "varsayilan"));
+    assert_eq!(w.key_path.as_deref(), Some("~/.ssh/id_web"));
+    assert_eq!(w.jump.as_deref(), Some(b.id.as_str()), "takma ad oturum kimliğine çevrilmeli");
+    let d = get("db");
+    assert_eq!(d.username, "postgres");
+    assert_eq!(d.jump.as_deref(), Some("ops@bastion.example.com:2200,other"));
+}
+
+#[test]
+fn parses_mobaxterm_sessions() {
+    let ini = "\u{feff}[Bookmarks]\r\nSubRep=\r\nImgNum=42\r\nweb= #109#0%10.0.0.1%22%root%%-1%-1%%%22%%0%0%0%%%-1%0%0%0%%1080%%0%0%1#MobaFont%10%0%0%0%15%236,236,236%30,30,30%180,180,192%0%-1%0%%xterm%-1%-1%_Std_Colors_0_%80%24%0%1%-1%<none>%%0#0# #-1\r\n\r\n[Bookmarks_1]\r\nSubRep=Müşteri\\Prod\r\nImgNum=41\r\nfiles= #140#0%files.example.com%2222%deploy%%-1%-1%%#MobaFont%10#0# #-1\r\nuzak masaüstü= #91#4%win.example.com%3389%admin%0%-1#MobaFont#0# #-1\r\n\r\n[Misc]\r\nfoo= #109#0%yoksay%22%x\r\n";
+    let p = crate::importers::parse_mobaxterm(ini);
+    assert_eq!(p.unsupported, 1);
+    assert_eq!(p.sessions.len(), 2);
+    let w = &p.sessions[0];
+    assert_eq!((w.name.as_str(), w.host.as_str(), w.port, w.username.as_str()), ("web", "10.0.0.1", 22, "root"));
+    assert_eq!(w.kind, store::SessionKind::Ssh);
+    let f = &p.sessions[1];
+    assert_eq!((f.host.as_str(), f.port, f.username.as_str()), ("files.example.com", 2222, "deploy"));
+    assert_eq!(f.kind, store::SessionKind::Sftp);
+    assert_eq!(f.folder.as_deref(), Some("Müşteri / Prod"));
+}
+
+#[test]
+fn import_skips_duplicates_and_relinks_jump() {
+    let dir = fresh_config("import-dup");
+    let existing = store::save_session(session("mevcut", None, store::AuthKind::Auto), None).unwrap();
+    let mut dup = session("mevcut", None, store::AuthKind::Auto);
+    dup.id = "yeni-kimlik".into();
+    let mut child = session("cocuk", None, store::AuthKind::Auto);
+    child.id = "cocuk-kimlik".into();
+    child.jump = Some("yeni-kimlik".into());
+    let r = crate::importers::import(vec![dup, child]).unwrap();
+    assert_eq!((r.added, r.skipped), (1, 1));
+    let c = store::load_sessions().unwrap().into_iter().find(|s| s.name == "cocuk").unwrap();
+    assert_eq!(c.jump.as_deref(), Some(existing.id.as_str()));
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -7,6 +7,10 @@
   import SessionDialog from "$lib/SessionDialog.svelte";
   import TunnelDialog from "$lib/TunnelDialog.svelte";
   import AboutDialog from "$lib/AboutDialog.svelte";
+  import HostKeyDialog from "$lib/HostKeyDialog.svelte";
+  import SettingsDialog from "$lib/SettingsDialog.svelte";
+  import { settings } from "$lib/settings.svelte";
+  import { updater } from "$lib/update-store.svelte";
   import ContextMenu, { type MenuItem } from "$lib/ContextMenu.svelte";
   import Icon from "$lib/Icon.svelte";
   import { api, formatSize, parseQuick, type Session, type Transfer } from "$lib/api";
@@ -21,6 +25,7 @@
   let editing = $state<{ session: Session | null; folder?: string | null } | null>(null);
   let tunnelTab = $state<Tab | null>(null);
   let aboutOpen = $state(false);
+  let settingsOpen = $state(false);
   let menu = $state<{ x: number; y: number; items: (MenuItem | null)[] } | null>(null);
   let quick = $state("");
   let terminals: Record<string, Terminal> = {};
@@ -48,6 +53,9 @@
 
   onMount(() => {
     store.loadSessions();
+    settings.load().then(() => {
+      if (settings.value.checkUpdates) updater.check(true);
+    });
     api.localShells().then((s) => {
       store.shells = s;
     });
@@ -110,12 +118,25 @@
       editing = { session: null };
     } else if (primary && e.code === "KeyB") {
       sidebarOpen = !sidebarOpen;
+    } else if (zoomMod(e) && (e.code === "Equal" || e.code === "NumpadAdd")) {
+      settings.zoom(1);
+    } else if (zoomMod(e) && (e.code === "Minus" || e.code === "NumpadSubtract")) {
+      settings.zoom(-1);
+    } else if (zoomMod(e) && (e.code === "Digit0" || e.code === "Numpad0")) {
+      settings.zoom(null);
+    } else if (zoomMod(e) && e.code === "Comma") {
+      settingsOpen = true;
     } else if (isMac && e.metaKey && /^Digit[1-9]$/.test(e.code)) {
       const t = store.tabs[Number(e.code.slice(5)) - 1];
       if (t) store.activeKey = t.key;
     } else return;
     e.preventDefault();
     e.stopPropagation();
+  }
+
+  // Yakınlaştırma ve ayarlar: macOS'ta ⌘, diğerlerinde Ctrl (Shift'siz).
+  function zoomMod(e: KeyboardEvent) {
+    return isMac ? e.metaKey && !e.ctrlKey && !e.altKey : e.ctrlKey && !e.metaKey && !e.altKey;
   }
 
   function startResize(e: PointerEvent) {
@@ -173,7 +194,10 @@
       <Icon name="bolt" size={14} />
       <input bind:value={quick} placeholder="Hızlı bağlan: kullanıcı@sunucu:port  (sftp://… yalnızca SFTP)" spellcheck="false" autocapitalize="off" />
     </form>
-    <button class="icon-btn about-btn" onclick={() => (aboutOpen = true)} title="Hakkında" aria-label="Hakkında">
+    <button class="icon-btn about-btn" onclick={() => (settingsOpen = true)} title="Ayarlar ({isMac ? '⌘' : 'Ctrl+'},)" aria-label="Ayarlar">
+      <Icon name="gear" size={17} />
+    </button>
+    <button class="icon-btn" onclick={() => (aboutOpen = true)} title="Hakkında" aria-label="Hakkında">
       <Icon name="info" size={17} />
     </button>
   </header>
@@ -297,6 +321,20 @@
   <footer class="status">
     <span>{describe(active)}</span>
     <span class="spacer"></span>
+    {#if !updater.dismissed && (updater.state.kind === "available" || updater.state.kind === "downloading" || updater.state.kind === "ready")}
+      <span class="update">
+        {#if updater.state.kind === "available"}
+          Liman {updater.state.version} çıktı
+          <button onclick={() => updater.install()}>Kur</button>
+          <button class="x" title="Sonra" onclick={() => (updater.dismissed = true)}>×</button>
+        {:else if updater.state.kind === "downloading"}
+          Güncelleme indiriliyor… {updater.state.total ? Math.round((updater.state.done / updater.state.total) * 100) : 0}%
+        {:else}
+          Güncelleme hazır
+          <button onclick={() => updater.restart()}>Yeniden başlat</button>
+        {/if}
+      </span>
+    {/if}
     {#each store.transfers as t (t.id)}
       <span class="xfer" class:err={t.state === "error"} title={t.error ?? t.name}>
         <Icon name={t.direction === "up" ? "upload" : "download"} size={12} />
@@ -322,6 +360,10 @@
 {/if}
 {#if tunnelTab}
   <TunnelDialog tab={tunnelTab} onClose={() => (tunnelTab = null)} />
+{/if}
+<HostKeyDialog />
+{#if settingsOpen}
+  <SettingsDialog onClose={() => (settingsOpen = false)} />
 {/if}
 {#if aboutOpen}
   <AboutDialog onClose={() => (aboutOpen = false)} />
@@ -838,7 +880,26 @@
   .spacer {
     flex: 1;
   }
-  .xfer {
+  .update {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--accent);
+  }
+  .update button {
+    padding: 0 7px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+  .update button.x {
+    border: 0;
+    color: var(--muted);
+  }
+    .xfer {
     display: flex;
     align-items: center;
     gap: 6px;
