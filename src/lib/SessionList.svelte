@@ -90,6 +90,9 @@
       y,
       items: [
         { label: "Bağlan", icon: "bolt", action: () => store.openSession(s) },
+        s.kind === "sftp"
+          ? { label: "Terminal ile aç (SSH)", icon: "terminal", action: () => store.openSession(s, false) }
+          : { label: "Yalnızca SFTP aç", icon: "folder", action: () => store.openSession(s, true) },
         { label: "Düzenle", icon: "edit", action: () => onEdit(s) },
         { label: "Çoğalt", icon: "copy", action: () => duplicate(s) },
         { label: "Gruba taşı…", icon: "folder", action: () => setTimeout(() => moveMenu(x, y, s)) },
@@ -203,11 +206,12 @@
     onpointerdown={(e) => onPointerDown(e, s)}
     title="{s.username ? s.username + '@' : ''}{s.host}:{s.port}  (çift tıkla: bağlan, sürükle: gruba taşı)"
   >
-    <span class="ic"><Icon name="server" size={14} /></span>
+    <span class="ic"><Icon name={s.kind === "sftp" ? "folder" : "server"} size={14} /></span>
     <span class="text">
       <span class="name">{s.name}</span>
       <span class="host">{s.username ? s.username + "@" : ""}{s.host}{s.port !== 22 ? ":" + s.port : ""}</span>
     </span>
+    {#if s.kind === "sftp"}<span class="badge">SFTP</span>{/if}
     {#if openCount(s)}<span class="dot" title="Açık oturum"></span>{/if}
     {#if s.hasSecret}<span class="key" title="Parola kayıtlı"><Icon name="key" size={12} /></span>{/if}
   </button>
@@ -465,6 +469,16 @@
   .host {
     font-size: 11px;
     color: var(--muted);
+  }
+  .badge {
+    flex: none;
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
   }
   .dot {
     width: 7px;

@@ -10,7 +10,8 @@
   import { api, errText, formatDate, formatSize, joinPath, parentPath, type Entry } from "./api";
   import { store } from "./tabs.svelte";
 
-  let { termId }: { termId: string } = $props();
+  /** wide: ana alanda tam ekran (yalnızca SFTP sekmesi); tarih ve izin sütunları da görünür. */
+  let { termId, wide = false }: { termId: string; wide?: boolean } = $props();
 
   let path = $state(store.sftpPaths[termId] ?? "");
   let pathInput = $state("");
@@ -228,7 +229,7 @@
   }
 </script>
 
-<div class="sftp" class:dropping bind:this={panel}>
+<div class="sftp" class:dropping class:wide bind:this={panel}>
   <div class="toolbar">
     <button class="icon-btn" title="Üst klasör" onclick={() => load(parentPath(path))}><Icon name="up" /></button>
     <button class="icon-btn" title="Ev klasörü" onclick={async () => load(await api.sftpHome(termId))}><Icon name="home" /></button>
@@ -256,6 +257,15 @@
 
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
   <div class="list" tabindex="0" onkeydown={onKey} oncontextmenu={(e) => context(e, null)} role="listbox" aria-label="Dosyalar">
+    {#if wide}
+      <div class="row head" aria-hidden="true">
+        <span class="ic"></span>
+        <span class="name">Ad</span>
+        <span class="size">Boyut</span>
+        <span class="date">Değiştirilme</span>
+        <span class="perms">İzinler</span>
+      </div>
+    {/if}
     {#if error}
       <p class="err">{error}</p>
     {/if}
@@ -312,6 +322,10 @@
           <span class="name">{e.name}</span>
         {/if}
         <span class="size">{e.isDir ? "" : formatSize(e.size)}</span>
+        {#if wide}
+          <span class="date">{formatDate(e.mtime)}</span>
+          <span class="perms">{e.isDir ? "d" : e.isLink ? "l" : "-"}{e.perms}</span>
+        {/if}
       </div>
     {:else}
       {#if !loading && !error}<p class="empty">Klasör boş</p>{/if}
@@ -403,6 +417,58 @@
     color: var(--muted);
     font-size: 11px;
     font-variant-numeric: tabular-nums;
+  }
+  .date,
+  .perms {
+    color: var(--muted);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .wide .size {
+    width: 80px;
+    text-align: right;
+    font-size: 11.5px;
+  }
+  .wide .date {
+    width: 130px;
+    padding-left: 16px;
+  }
+  .wide .perms {
+    width: 100px;
+    font-family: "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+  }
+  .wide .row {
+    padding: 4px 10px;
+    font-size: 13px;
+  }
+  .row.head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 11px !important;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+  }
+  .row.head:hover {
+    background: var(--panel);
+  }
+  .row.head .ic {
+    width: 15px;
+  }
+  .wide .toolbar,
+  .wide .path,
+  .wide .hidden-toggle {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .wide .list {
+    padding: 0 8px 12px;
   }
   .rename {
     flex: 1;

@@ -68,6 +68,7 @@ fn test_params(secret: Option<&str>) -> Option<ssh::ConnectParams> {
         auth: store::AuthKind::Key,
         key_path: Some(key),
         secret: secret.map(String::from),
+        shell: true,
     })
 }
 
@@ -91,6 +92,17 @@ fn local_shell_runs() {
     } else {
         (b"echo liman-$((40+2))\r", "liman-42")
     };
+    // Windows ConPTY açılışta imleç konumunu sorar (ESC[6n) ve yanıt gelene kadar girdiyi
+    // işlemez. Uygulamada bunu xterm.js yanıtlar; testte biz yanıtlıyoruz.
+    if cfg!(windows) {
+        for _ in 0..50 {
+            if out.text().contains("\x1b[6n") {
+                term.write(b"\x1b[1;1R").unwrap();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
     term.write(cmd).unwrap();
     term.resize(120, 30).unwrap();
     term.write(b"exit 3\r").unwrap();
@@ -110,12 +122,12 @@ async fn ssh_shell_sftp_and_tunnel() {
     let (out, sink) = Output::new();
     let (on_exit, exited) = exit_signal();
     let term = ssh::connect(params, 100, 30, sink, on_exit).await.unwrap();
-    term.tx
+    term
         .send(ssh::SshInput::Data(b"echo liman-$((40+2))\n".to_vec()))
         .unwrap();
     out.wait_for("liman-42").await;
-    term.tx.send(ssh::SshInput::Resize(132, 40)).unwrap();
-    term.tx
+    term.send(ssh::SshInput::Resize(132, 40)).unwrap();
+    term
         .send(ssh::SshInput::Data(b"stty size\n".to_vec()))
         .unwrap();
     out.wait_for("40 132").await;
@@ -204,7 +216,7 @@ async fn ssh_shell_sftp_and_tunnel() {
     assert!(term.conn.tunnels().is_empty());
 
     // --- Çıkış ---
-    term.tx
+    term
         .send(ssh::SshInput::Data(b"exit 3\n".to_vec()))
         .unwrap();
     let code = tokio::time::timeout(Duration::from_secs(10), exited)
@@ -262,6 +274,7 @@ fn session(name: &str, folder: Option<&str>, auth: store::AuthKind) -> store::Se
         key_path: None,
         folder: folder.map(String::from),
         has_secret: false,
+        kind: store::SessionKind::Ssh,
     }
 }
 
@@ -363,4 +376,31 @@ fn export_import_roundtrip_with_secrets() {
 
     let _ = std::fs::remove_dir_all(src);
     let _ = std::fs::remove_dir_all(dst);
+}
+
+#[tokio::test]
+async fn sftp_only_connection() {
+    let Some(mut params) = test_params(None) else {
+        return;
+    };
+    params.shell = false;
+    let (out, sink) = Output::new();
+    let (on_exit, exited) = exit_signal();
+    let term = ssh::connect(params, 80, 24, sink, on_exit).await.unwrap();
+    assert!(term.tx.is_none(), "yalnızca SFTP bağlantısında kabuk açılmamalı");
+    // Kabuk girdisi sessizce yok sayılır.
+    term.send(ssh::SshInput::Data(b"echo x\n".to_vec())).unwrap();
+
+    let s = term.conn.sftp().await.unwrap();
+    let home = s.canonicalize(".").await.unwrap();
+    sftp::list(s, &home).await.unwrap();
+
+    // Bağlantı kopunca sekmeye haber verilir.
+    term.conn.disconnect().await;
+    let code = tokio::time::timeout(Duration::from_secs(10), exited)
+        .await
+        .expect("bağlantı kopması bildirilmedi")
+        .unwrap();
+    assert_eq!(code, None);
+    assert!(!out.text().contains("echo x"));
 }

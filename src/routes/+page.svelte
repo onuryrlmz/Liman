@@ -64,7 +64,10 @@
       store.notify("Biçim: kullanıcı@sunucu:port", "error");
       return;
     }
-    store.openSsh({ host: q.host, port: q.port, username: q.username, auth: "auto" }, quick.trim());
+    store.openSsh(
+      { host: q.host, port: q.port, username: q.username, auth: "auto", sftpOnly: q.sftpOnly },
+      quick.trim().replace(/^ssh:\/\//i, ""),
+    );
     quick = "";
   }
 
@@ -87,7 +90,7 @@
       items: [
         { label: "Yeniden bağlan", icon: "refresh", disabled: tab.status === "open" || tab.status === "connecting", action: () => terminals[tab.key]?.restart() },
         { label: "Çoğalt", icon: "copy", action: () => store.duplicate(tab) },
-        tab.kind === "ssh" ? { label: "Tüneller…", icon: "tunnel", disabled: tab.status !== "open", action: () => (tunnelTab = tab) } : null,
+        tab.kind !== "local" ? { label: "Tüneller…", icon: "tunnel", disabled: tab.status !== "open", action: () => (tunnelTab = tab) } : null,
         null,
         { label: "Kapat", icon: "x", action: () => store.close(tab.key) },
         { label: "Diğerlerini kapat", action: () => store.tabs.filter((t) => t.key !== tab.key).forEach((t) => store.close(t.key)) },
@@ -135,7 +138,7 @@
     const st = { connecting: "bağlanıyor…", open: "bağlı", closed: "kapandı", error: "hata" }[t.status];
     if (t.kind === "local") return `Yerel • ${t.shell ?? "varsayılan kabuk"} • ${st}`;
     const c = t.connect!;
-    return `SSH • ${c.username ? c.username + "@" : ""}${c.host}:${c.port} • ${st}`;
+    return `${t.kind === "sftp" ? "SFTP" : "SSH"} • ${c.username ? c.username + "@" : ""}${c.host}:${c.port} • ${st}`;
   }
 </script>
 
@@ -157,7 +160,7 @@
     </div>
     <button
       class="tool"
-      disabled={active?.kind !== "ssh" || active.status !== "open"}
+      disabled={!active || active.kind === "local" || active.status !== "open"}
       onclick={() => (tunnelTab = active)}
       title="Aktif SSH oturumu için port yönlendirme"
     >
@@ -168,7 +171,7 @@
     </button>
     <form class="quick" onsubmit={quickConnect}>
       <Icon name="bolt" size={14} />
-      <input bind:value={quick} placeholder="Hızlı bağlan: kullanıcı@sunucu:port" spellcheck="false" autocapitalize="off" />
+      <input bind:value={quick} placeholder="Hızlı bağlan: kullanıcı@sunucu:port  (sftp://… yalnızca SFTP)" spellcheck="false" autocapitalize="off" />
     </form>
     <button class="icon-btn about-btn" onclick={() => (aboutOpen = true)} title="Hakkında" aria-label="Hakkında">
       <Icon name="info" size={17} />
@@ -218,7 +221,7 @@
             title={describe(tab)}
           >
             <span class="st {tab.status}"></span>
-            <Icon name={tab.kind === "ssh" ? "server" : "terminal"} size={13} />
+            <Icon name={tab.kind === "ssh" ? "server" : tab.kind === "sftp" ? "folder" : "terminal"} size={13} />
             <span class="title">{tab.title}</span>
             <button
               class="close"
@@ -242,6 +245,15 @@
               active={tab.key === store.activeKey}
               onUpdate={(p) => store.patch(tab.key, p)}
             />
+            <!-- Yalnızca SFTP: bağlıyken terminalin yerine tam ekran dosya tarayıcısı.
+                 Bağlantı koparsa terminal (günlük ve "R ile yeniden bağlan") yeniden görünür. -->
+            {#if tab.kind === "sftp" && tab.status === "open" && tab.termId}
+              <div class="sftp-pane">
+                {#key tab.termId}
+                  <SftpPanel termId={tab.termId} wide />
+                {/key}
+              </div>
+            {/if}
           </div>
         {/each}
 
@@ -255,7 +267,7 @@
             <div class="actions">
               <button class="card" onclick={() => (editing = { session: null })}>
                 <Icon name="server" size={22} />
-                <strong>Yeni SSH oturumu</strong>
+                <strong>Yeni oturum</strong>
                 <span>{mod}N</span>
               </button>
               <button class="card" onclick={() => store.openLocal()}>
@@ -701,6 +713,11 @@
   .pane {
     position: absolute;
     inset: 0;
+  }
+  .sftp-pane {
+    position: absolute;
+    inset: 0;
+    background: var(--panel);
   }
   .pane.hidden {
     visibility: hidden;

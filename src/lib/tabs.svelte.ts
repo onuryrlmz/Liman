@@ -4,7 +4,7 @@ export type TabStatus = "connecting" | "open" | "closed" | "error";
 
 export interface Tab {
   key: string;
-  kind: "local" | "ssh";
+  kind: "local" | "ssh" | "sftp";
   title: string;
   status: TabStatus;
   termId: string | null;
@@ -53,7 +53,7 @@ class Store {
   openSsh(connect: ConnectRequest, title: string, session?: Session) {
     const tab: Tab = {
       key: nextKey(),
-      kind: "ssh",
+      kind: connect.sftpOnly ? "sftp" : "ssh",
       title,
       status: "connecting",
       termId: null,
@@ -65,9 +65,18 @@ class Store {
     this.activeKey = tab.key;
   }
 
-  openSession(s: Session) {
+  /** `sftpOnly` verilmezse oturumun kendi türü kullanılır. */
+  openSession(s: Session, sftpOnly = s.kind === "sftp") {
     this.openSsh(
-      { sessionId: s.id, host: s.host, port: s.port, username: s.username, auth: s.auth, keyPath: s.keyPath },
+      {
+        sessionId: s.id,
+        host: s.host,
+        port: s.port,
+        username: s.username,
+        auth: s.auth,
+        keyPath: s.keyPath,
+        sftpOnly,
+      },
       s.name || s.host,
       s,
     );

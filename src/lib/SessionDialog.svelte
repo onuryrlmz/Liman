@@ -12,7 +12,7 @@
 
   const initial: Session = session
     ? { ...session }
-    : { id: "", name: "", host: "", port: 22, username: "", auth: "auto", keyPath: "", folder: folder ?? "" };
+    : { id: "", name: "", host: "", port: 22, username: "", auth: "auto", keyPath: "", folder: folder ?? "", kind: "ssh" };
 
   let form = $state(initial);
   let secret = $state("");
@@ -58,7 +58,7 @@
   }
 </script>
 
-<Modal title={session ? "Oturumu düzenle" : "Yeni SSH oturumu"} {onClose}>
+<Modal title={session ? "Oturumu düzenle" : "Yeni oturum"} {onClose}>
   <form
     class="grid"
     onsubmit={(e) => {
@@ -66,6 +66,16 @@
       save(true);
     }}
   >
+    <div class="kind full" role="radiogroup" aria-label="Bağlantı türü">
+      <button type="button" role="radio" aria-checked={form.kind !== "sftp"} class:on={form.kind !== "sftp"} onclick={() => (form.kind = "ssh")}>
+        <strong>SSH</strong>
+        <span>Terminal + yanda SFTP paneli</span>
+      </button>
+      <button type="button" role="radio" aria-checked={form.kind === "sftp"} class:on={form.kind === "sftp"} onclick={() => (form.kind = "sftp")}>
+        <strong>Yalnızca SFTP</strong>
+        <span>Terminal açmadan dosya tarayıcısı</span>
+      </button>
+    </div>
     <label class="wide">
       <span>Sunucu</span>
       <!-- svelte-ignore a11y_autofocus -->
@@ -147,6 +157,32 @@
   }
   .grid > label.narrow {
     grid-column: span 1;
+  }
+  .kind {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .kind button {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .kind button span {
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .kind button.on {
+    border-color: var(--accent);
+    background: var(--accent-soft);
   }
   .grid > .full {
     grid-column: 1 / -1;

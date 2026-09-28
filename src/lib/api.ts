@@ -1,6 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 export type AuthKind = "auto" | "password" | "key";
+export type SessionKind = "ssh" | "sftp";
 
 export interface Session {
   id: string;
@@ -12,6 +13,7 @@ export interface Session {
   keyPath?: string | null;
   folder?: string | null;
   hasSecret?: boolean;
+  kind?: SessionKind;
 }
 
 export interface ConnectRequest {
@@ -23,6 +25,8 @@ export interface ConnectRequest {
   keyPath?: string | null;
   secret?: string | null;
   saveSecret?: boolean;
+  /** Kabuk açmadan yalnızca SFTP. */
+  sftpOnly?: boolean;
 }
 
 export interface Entry {
@@ -151,11 +155,18 @@ export function formatDate(secs: number | null) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** "kullanici@host:port" biçimini çözer. */
-export function parseQuick(s: string): { username: string; host: string; port: number } | null {
-  const m = s.trim().match(/^(?:([^@\s]+)@)?([^:\s]+)(?::(\d+))?$/);
+/** "[sftp://]kullanici@host:port" biçimini çözer. */
+export function parseQuick(
+  s: string,
+): { username: string; host: string; port: number; sftpOnly: boolean } | null {
+  const m = s.trim().match(/^(?:(ssh|sftp):\/\/)?(?:([^@\s]+)@)?([^:\s/]+)(?::(\d+))?\/?$/i);
   if (!m) return null;
-  return { username: m[1] ?? "", host: m[2], port: m[3] ? Number(m[3]) : 22 };
+  return {
+    username: m[2] ?? "",
+    host: m[3],
+    port: m[4] ? Number(m[4]) : 22,
+    sftpOnly: m[1]?.toLowerCase() === "sftp",
+  };
 }
 
 export function errText(e: unknown) {

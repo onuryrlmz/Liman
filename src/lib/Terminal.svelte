@@ -85,7 +85,7 @@
           req.secret = pw;
         }
         for (let attempt = 0; ; attempt++) {
-          info(`${req.username}@${req.host}:${req.port} adresine bağlanılıyor...`);
+          info(`${req.sftpOnly ? "SFTP: " : ""}${req.username}@${req.host}:${req.port} adresine bağlanılıyor...`);
           try {
             termId = await api.sshConnect(req, cols, rows, write);
             break;

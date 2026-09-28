@@ -33,6 +33,8 @@ pub struct ConnectParams {
     pub auth: store::AuthKind,
     pub key_path: Option<String>,
     pub secret: Option<String>,
+    /// false: kabuk açmadan yalnızca SFTP.
+    pub shell: bool,
 }
 
 pub enum SshInput {
@@ -62,8 +64,18 @@ pub struct SshConn {
 }
 
 pub struct SshTerm {
-    pub tx: mpsc::UnboundedSender<SshInput>,
+    /// Yalnızca SFTP bağlantılarında kabuk yoktur.
+    pub tx: Option<mpsc::UnboundedSender<SshInput>>,
     pub conn: Arc<SshConn>,
+}
+
+impl SshTerm {
+    pub fn send(&self, input: SshInput) -> Result<()> {
+        match &self.tx {
+            Some(tx) => tx.send(input).map_err(|_| anyhow!("Bağlantı kapalı")),
+            None => Ok(()),
+        }
+    }
 }
 
 pub struct Client {
@@ -209,7 +221,32 @@ pub async fn connect(
         bail!(AUTH_FAILED);
     }
 
-    let channel = handle.channel_open_session().await?;
+    let conn = Arc::new(SshConn {
+        handle,
+        sftp: OnceCell::new(),
+        tunnels: Mutex::new(HashMap::new()),
+    });
+
+    if !p.shell {
+        // SFTP alt sistemi yoksa bağlantı hatası olarak göster.
+        conn.sftp().await?;
+        let weak = Arc::downgrade(&conn);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                match weak.upgrade() {
+                    Some(c) if !c.handle.is_closed() => continue,
+                    Some(_) => break,
+                    // Sekme kapatıldı; bildirecek kimse yok.
+                    None => return,
+                }
+            }
+            on_exit(None);
+        });
+        return Ok(SshTerm { tx: None, conn });
+    }
+
+    let channel = conn.handle.channel_open_session().await?;
     channel
         .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
         .await?;
@@ -251,14 +288,7 @@ pub async fn connect(
         on_exit(code);
     });
 
-    Ok(SshTerm {
-        tx,
-        conn: Arc::new(SshConn {
-            handle,
-            sftp: OnceCell::new(),
-            tunnels: Mutex::new(HashMap::new()),
-        }),
-    })
+    Ok(SshTerm { tx: Some(tx), conn })
 }
 
 impl SshConn {

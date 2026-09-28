@@ -20,6 +20,16 @@ pub enum AuthKind {
     Key,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionKind {
+    /// Terminal + yan panelde SFTP.
+    #[default]
+    Ssh,
+    /// Kabuk açmadan yalnızca dosya tarayıcısı.
+    Sftp,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -39,6 +49,8 @@ pub struct Session {
     pub folder: Option<String>,
     #[serde(default)]
     pub has_secret: bool,
+    #[serde(default)]
+    pub kind: SessionKind,
 }
 
 fn default_port() -> u16 {

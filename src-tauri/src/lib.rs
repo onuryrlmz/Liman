@@ -100,6 +100,8 @@ struct ConnectRequest {
     secret: Option<String>,
     #[serde(default)]
     save_secret: bool,
+    #[serde(default)]
+    sftp_only: bool,
 }
 
 #[tauri::command]
@@ -124,6 +126,7 @@ async fn ssh_connect(
         auth: req.auth,
         key_path: req.key_path,
         secret,
+        shell: !req.sftp_only,
     };
     let id = uuid::Uuid::new_v4().to_string();
     let term = ssh::connect(params, cols, rows, sink(on_data), on_exit(app, id.clone()))
@@ -142,10 +145,7 @@ async fn ssh_connect(
 fn term_write(state: State<'_, AppState>, id: String, data: String) -> CmdResult<()> {
     match state.terms.lock().unwrap().get_mut(&id) {
         Some(Term::Local(t)) => t.write(data.as_bytes()).map_err(err),
-        Some(Term::Ssh(t)) => t
-            .tx
-            .send(ssh::SshInput::Data(data.into_bytes()))
-            .map_err(|_| "Bağlantı kapalı".to_string()),
+        Some(Term::Ssh(t)) => t.send(ssh::SshInput::Data(data.into_bytes())).map_err(err),
         None => Ok(()),
     }
 }
@@ -155,7 +155,7 @@ fn term_resize(state: State<'_, AppState>, id: String, cols: u16, rows: u16) -> 
     match state.terms.lock().unwrap().get(&id) {
         Some(Term::Local(t)) => t.resize(cols, rows).map_err(err),
         Some(Term::Ssh(t)) => {
-            let _ = t.tx.send(ssh::SshInput::Resize(cols as u32, rows as u32));
+            let _ = t.send(ssh::SshInput::Resize(cols as u32, rows as u32));
             Ok(())
         }
         None => Ok(()),
@@ -168,7 +168,7 @@ async fn term_close(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     match term {
         Some(Term::Local(mut t)) => t.kill(),
         Some(Term::Ssh(t)) => {
-            let _ = t.tx.send(ssh::SshInput::Close);
+            let _ = t.send(ssh::SshInput::Close);
             t.conn.disconnect().await;
         }
         None => {}
