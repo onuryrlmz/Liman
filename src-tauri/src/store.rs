@@ -146,7 +146,7 @@ pub fn load_sessions() -> Result<Vec<Session>> {
         return Ok(vec![]);
     }
     let text = fs::read_to_string(&path).context("Oturum dosyası okunamadı")?;
-    Ok(serde_json::from_str(&text).context("Oturum dosyası bozuk")?)
+    serde_json::from_str(&text).context("Oturum dosyası bozuk")
 }
 
 fn write_json<T: Serialize + ?Sized>(path: PathBuf, value: &T) -> Result<()> {

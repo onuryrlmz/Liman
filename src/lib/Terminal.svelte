@@ -40,6 +40,17 @@
   let ro: ResizeObserver | undefined;
   const isMac = navigator.platform.toLowerCase().includes("mac");
 
+  /** Bileşen kaldırıldı; hâlâ süren bağlanma işi açtığı bağlantıyı kendisi kapatmalı. */
+  let destroyed = false;
+
+  /** Kaldırılmışsak yeni açılan bağlantıyı kapatır; `true` dönerse akış durmalı. */
+  function abandoned() {
+    if (!destroyed) return false;
+    if (termId) api.termClose(termId);
+    termId = null;
+    return true;
+  }
+
   /** Son başarılı bağlantının bilgileri (yazılan parola dahil); yeniden bağlanmada kullanılır. */
   let lastReq: ConnectRequest | null = null;
 
@@ -137,8 +148,10 @@
           }
         }
         lastReq = { ...req, saveSecret: false };
+        if (abandoned()) return;
         await startSavedTunnels();
       }
+      if (abandoned()) return;
       reconnectAttempt = 0;
       onUpdate({ status: "open", termId });
       if (fitNow()) api.termResize(termId!, term.cols, term.rows);
@@ -176,6 +189,7 @@
   async function startSavedTunnels() {
     const session = tab.sessionId ? store.sessions.find((s) => s.id === tab.sessionId) : undefined;
     for (const t of session?.tunnels ?? []) {
+      if (destroyed || !termId) return;
       try {
         const info = await api.tunnelStart(termId!, t);
         term.write(`\x1b[90mTünel açıldı: ${describeTunnel(info)}\x1b[0m\r\n`);
@@ -430,6 +444,7 @@
   });
 
   onDestroy(() => {
+    destroyed = true;
     cancelReconnect();
     ro?.disconnect();
     unlisten?.();

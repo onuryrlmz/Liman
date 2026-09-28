@@ -31,7 +31,14 @@
     onUpdate({ status: "connecting" });
     const { host, port, username, jump } = tab.connect!;
     try {
-      if (jump && !viaId) viaId = await openVia(jump, () => {});
+      // Her açılışta taze tünel: önceki SSH bağlantısı kopmuş olabilir, açık kalanı da sızmasın.
+      if (viaId) api.termClose(viaId);
+      viaId = null;
+      if (jump) viaId = await openVia(jump, () => {});
+      if (destroyed) {
+        if (viaId) api.termClose(viaId);
+        return;
+      }
       [file, target] = await api.rdpPrepare(host, port, username, viaId);
       await openPath(file);
       phase = "open";
@@ -48,7 +55,9 @@
   }
 
   onMount(launch);
+  let destroyed = false;
   onDestroy(() => {
+    destroyed = true;
     if (viaId) api.termClose(viaId);
   });
 </script>

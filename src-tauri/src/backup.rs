@@ -243,7 +243,7 @@ fn decrypt(env: Envelope, password: Option<&str>) -> Result<Payload> {
     let plain = cipher(&key)?
         .decrypt(&nonce, data.as_slice())
         .map_err(|_| anyhow!(WRONG_PASSWORD))?;
-    Ok(serde_json::from_slice(&plain).context("Dosya bozuk (içerik)")?)
+    serde_json::from_slice(&plain).context("Dosya bozuk (içerik)")
 }
 
 /// Özel anahtarı uygulamanın klasörüne yazar ve yolunu döndürür.

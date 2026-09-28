@@ -56,7 +56,7 @@
 
   // Uzak panelden bırakılanları bu klasöre indir.
   $effect(() =>
-    fileDrag.zone("local", (items) => {
+    fileDrag.zone("local", termId, (items) => {
       const dir = path;
       for (const e of items) {
         const id = crypto.randomUUID();
@@ -67,7 +67,7 @@
   );
 
   function upload(items: Entry[]) {
-    fileDrag.deliver("remote", items, "local");
+    fileDrag.deliver("remote", termId, items, "local");
   }
 
   async function remove(items: Entry[]) {
@@ -166,7 +166,7 @@
   }
 </script>
 
-<div class="local" class:over={fileDrag.drag?.over === "local"} data-file-drop="local">
+<div class="local" class:over={fileDrag.isOver("local", termId)} data-file-drop="local" data-file-group={termId}>
   <div class="toolbar">
     <span class="side">Bu bilgisayar</span>
     <button class="icon-btn" title="Üst klasör" disabled={!parent} onclick={() => parent && load(parent)}><Icon name="up" /></button>
@@ -232,7 +232,7 @@
         onpointerdown={(ev) => {
           if (renaming) return;
           if (!selected.has(e.path) && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey) selected = new Set([e.path]);
-          fileDrag.start(ev, "local", () => selectedEntries);
+          fileDrag.start(ev, "local", termId, () => selectedEntries);
         }}
         ondblclick={() => activate(e)}
         oncontextmenu={(ev) => {
@@ -266,7 +266,7 @@
       {#if !error}<p class="empty">Klasör boş</p>{/if}
     {/each}
   </div>
-  {#if fileDrag.drag?.over === "local"}
+  {#if fileDrag.isOver("local", termId)}
     <div class="drop-hint"><Icon name="download" size={22} /> {path} klasörüne indir</div>
   {/if}
 </div>

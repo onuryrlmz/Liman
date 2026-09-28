@@ -27,6 +27,8 @@
   let message = $state("");
   let log = $state<string[]>([]);
   let password = $state("");
+  let username = $state("");
+  let needUser = $state(false);
   let scale = $state(true);
   let viewOnly = $state(false);
 
@@ -59,6 +61,17 @@
     if (s) log = [...log.slice(-8), s];
   }
 
+  let destroyed = false;
+  /** Akış kimliği arayüze ulaşmadan kapanan akışlar (sunucu hemen bağlantıyı kesti). */
+  const exited = new Set<string>();
+
+  function markClosed() {
+    if (bridge && bridge.readyState !== "closed") {
+      bridge.readyState = "closed";
+      bridge.onclose?.({ code: 1006, reason: "", wasClean: false });
+    }
+  }
+
   async function connect() {
     cleanup();
     phase = "connecting";
@@ -67,18 +80,30 @@
     onUpdate({ status: "connecting" });
     const { host, port, jump } = tab.connect!;
     try {
+      // Dinleyici akış açılmadan kurulur ki erken kapanış kaçmasın.
+      unlisten = await listen<{ id: string }>("term-exit", (ev) => {
+        exited.add(ev.payload.id);
+        if (ev.payload.id === streamId) markClosed();
+      });
       if (jump) viaId = await openVia(jump, addLog);
+      if (destroyed) return cleanup();
       addLog(`VNC: ${host}:${port}${viaId ? " (SSH tüneli üzerinden)" : ""}`);
       const pending: Uint8Array[] = [];
       streamId = await api.streamOpen(host, port, viaId, (d) => {
         if (bridge?.onmessage) bridge.onmessage({ data: d.slice().buffer });
         else pending.push(d.slice());
       });
+      if (destroyed) return cleanup();
       bridge = new Bridge(streamId);
       const saved = tab.sessionId ? await api.sessionPassword(tab.sessionId).catch(() => null) : null;
-      rfb = new RFB(screen, bridge as unknown as WebSocket, { credentials: saved ? { password: saved } : undefined });
+      if (destroyed) return cleanup();
+      const user = tab.connect?.username || undefined;
+      rfb = new RFB(screen, bridge as unknown as WebSocket, {
+        credentials: saved || user ? { username: user, password: saved ?? undefined } : undefined,
+      });
       // Kanal hazırlanırken gelen ilk baytlar (sunucu sürümü) kaybolmasın.
       for (const d of pending) bridge.onmessage?.({ data: d.buffer as ArrayBuffer });
+      if (exited.has(streamId)) markClosed();
       rfb.scaleViewport = scale;
       rfb.resizeSession = false;
       rfb.viewOnly = viewOnly;
@@ -95,7 +120,11 @@
         }
         onUpdate({ status: phase === "error" ? "error" : "closed" });
       });
-      rfb.addEventListener("credentialsrequired", () => {
+      rfb.addEventListener("credentialsrequired", (e) => {
+        // macOS Ekran Paylaşımı gibi sunucular kullanıcı adı da ister.
+        const types: string[] = (e as CustomEvent).detail?.types ?? ["password"];
+        needUser = types.includes("username");
+        username = username || tab.connect?.username || "";
         phase = "password";
         onUpdate({ status: "connecting" });
       });
@@ -104,13 +133,8 @@
         message = `Güvenlik doğrulaması başarısız: ${(e as CustomEvent).detail?.reason ?? "parola yanlış olabilir"}`;
       });
       rfb.addEventListener("desktopname", (e) => onUpdate({ remoteTitle: (e as CustomEvent).detail?.name }));
-      unlisten = await listen<{ id: string }>("term-exit", (ev) => {
-        if (ev.payload.id === streamId && bridge && bridge.readyState !== "closed") {
-          bridge.readyState = "closed";
-          bridge.onclose?.({ code: 1006, reason: "", wasClean: false });
-        }
-      });
     } catch (e) {
+      if (destroyed) return cleanup();
       phase = "error";
       message = errText(e);
       onUpdate({ status: "error" });
@@ -120,7 +144,7 @@
   function sendPassword(e: Event) {
     e.preventDefault();
     phase = "connecting";
-    rfb?.sendCredentials({ password });
+    rfb?.sendCredentials(needUser ? { username, password } : { password });
     password = "";
   }
 
@@ -159,7 +183,10 @@
   });
 
   onMount(connect);
-  onDestroy(cleanup);
+  onDestroy(() => {
+    destroyed = true;
+    cleanup();
+  });
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -185,9 +212,15 @@
       {#if phase === "password"}
         <form class="card" onsubmit={sendPassword}>
           <Icon name="key" size={22} />
-          <strong>VNC parolası</strong>
-          <!-- svelte-ignore a11y_autofocus -->
-          <input type="password" bind:value={password} autofocus />
+          <strong>{needUser ? "VNC girişi" : "VNC parolası"}</strong>
+          {#if needUser}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input bind:value={username} placeholder="Kullanıcı adı" autofocus spellcheck="false" />
+            <input type="password" bind:value={password} placeholder="Parola" />
+          {:else}
+            <!-- svelte-ignore a11y_autofocus -->
+            <input type="password" bind:value={password} autofocus />
+          {/if}
           <button class="btn primary" type="submit">Bağlan</button>
           <small>Oturum ayarlarından parolayı kaydedebilirsiniz.</small>
         </form>

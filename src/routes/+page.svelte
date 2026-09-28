@@ -199,10 +199,8 @@
         node.dir === "row"
           ? ((ev.clientX - box.left) / box.width - area.x) / area.w
           : ((ev.clientY - box.top) / box.height - area.y) / area.h;
+      // Canlı düğüm ($state vekili) değişir; yerleşim kendiliğinden yeniden hesaplanır.
       node.ratio = Math.max(0.1, Math.min(0.9, pos));
-      // Nesne yerinde değişti; türetilmiş yerleşimi tazele.
-      const v = store.activeView;
-      if (v) v.root = { ...v.root };
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -213,6 +211,11 @@
   }
 
   function onKey(e: KeyboardEvent) {
+    // Açık bir pencere (dialog) ya da metin alanı varken kısayollar ona bırakılır;
+    // xterm'in gizli metin alanı bunun dışında.
+    const t = e.target as HTMLElement | null;
+    if (t?.closest('[role="dialog"]')) return;
+    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && !t.closest(".xterm")) return;
     const primary = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && e.shiftKey;
     if (e.ctrlKey && e.key === "Tab") {
       store.cycle(e.shiftKey ? -1 : 1);
@@ -253,7 +256,8 @@
 
   // Yakınlaştırma ve ayarlar: macOS'ta ⌘, diğerlerinde Ctrl (Shift'siz).
   function zoomMod(e: KeyboardEvent) {
-    return isMac ? e.metaKey && !e.ctrlKey && !e.altKey : e.ctrlKey && !e.metaKey && !e.altKey;
+    // Linux/Windows'ta Shift'li hâlleri (ör. Ctrl+_ = geri al) terminale kalır.
+    return isMac ? e.metaKey && !e.ctrlKey && !e.altKey : e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
   }
 
   function startResize(e: PointerEvent) {

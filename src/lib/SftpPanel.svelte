@@ -90,7 +90,7 @@
   // Çift panel: yerel panelden bırakılanları yükle.
   $effect(() => {
     if (localDir === null) return;
-    return fileDrag.zone("remote", (items) => uploadPaths(items.map((e) => e.path)));
+    return fileDrag.zone("remote", termId, (items) => uploadPaths(items.map((e) => e.path)));
   });
 
   // Başka yerden (eşitleme, yerel panel) yapılan yüklemeler bitince listeyi tazele.
@@ -282,10 +282,11 @@
 
 <div
   class="sftp"
-  class:dropping={dropping || fileDrag.drag?.over === "remote"}
+  class:dropping={dropping || fileDrag.isOver("remote", termId)}
   class:wide
   bind:this={panel}
   data-file-drop={localDir !== null ? "remote" : undefined}
+  data-file-group={termId}
 >
   <div class="toolbar">
     <button class="icon-btn" title="Üst klasör" onclick={() => load(parentPath(path))}><Icon name="up" /></button>
@@ -356,7 +357,7 @@
         onpointerdown={(ev) => {
           if (localDir === null || renaming) return;
           if (!selected.has(e.path) && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey) selected = new Set([e.path]);
-          fileDrag.start(ev, "remote", () => selectedEntries);
+          fileDrag.start(ev, "remote", termId, () => selectedEntries);
         }}
         ondblclick={() => activate(e)}
         oncontextmenu={(ev) => {
@@ -393,7 +394,7 @@
       {#if !loading && !error}<p class="empty">Klasör boş</p>{/if}
     {/each}
   </div>
-  {#if dropping || fileDrag.drag?.over === "remote"}
+  {#if dropping || fileDrag.isOver("remote", termId)}
     <div class="drop-hint"><Icon name="upload" size={22} /> {path} klasörüne yükle</div>
   {/if}
 </div>
