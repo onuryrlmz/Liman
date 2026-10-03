@@ -91,6 +91,8 @@ struct Tunnel {
 }
 
 pub struct SshConn {
+    /// Sunucu kaynak izleme: hız hesabı için önceki ölçüm.
+    pub stats_prev: Mutex<Option<crate::stats::Sample>>,
     handle: client::Handle<Client>,
     /// Atlama sunucusu bağlantıları (hedefe yakın olan sonda).
     jumps: Vec<client::Handle<Client>>,
@@ -536,6 +538,7 @@ pub async fn connect(
         tunnels: Mutex::new(HashMap::new()),
         forwards,
         x11,
+        stats_prev: Mutex::new(None),
     });
 
     if !p.shell {
@@ -643,6 +646,29 @@ impl SshConn {
             .channel_open_direct_tcpip(host.to_string(), port as u32, "127.0.0.1", 0)
             .await?;
         Ok(ch.into_stream())
+    }
+
+    /// Kabuk açmadan bir komut çalıştırır; `stdin` gönderilip kapatılır, çıktı toplanır.
+    pub async fn exec_capture(&self, command: &str, stdin: &[u8], timeout: Duration) -> Result<String> {
+        let mut ch = self.handle.channel_open_session().await?;
+        ch.exec(true, command).await?;
+        ch.data_bytes(stdin.to_vec()).await?;
+        ch.eof().await?;
+        let mut out = Vec::new();
+        let collect = async {
+            while let Some(msg) = ch.wait().await {
+                match msg {
+                    ChannelMsg::Data { data } => out.extend_from_slice(&data),
+                    ChannelMsg::Close => break,
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(timeout, collect)
+            .await
+            .map_err(|_| anyhow!("Komut zaman aşımına uğradı"))?;
+        let _ = ch.close().await;
+        Ok(String::from_utf8_lossy(&out).into_owned())
     }
 
     pub fn is_closed(&self) -> bool {

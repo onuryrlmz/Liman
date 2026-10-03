@@ -6,6 +6,7 @@ mod localfs;
 mod logger;
 mod sftp;
 mod ssh;
+mod stats;
 mod store;
 mod stream;
 mod x11;
@@ -364,6 +365,22 @@ async fn rdp_prepare(
     }
     std::fs::write(&path, body).map_err(err)?;
     Ok((path.to_string_lossy().into_owned(), target))
+}
+
+/// Bağlı sunucunun kaynak durumu (alt çubuk). Kabuk kanalından bağımsız bir kanalda çalışır.
+#[tauri::command]
+async fn ssh_stats(state: State<'_, AppState>, id: String) -> CmdResult<stats::Stats> {
+    let conn = state.conn(&id)?;
+    let out = conn
+        .exec_capture("sh -s", stats::SCRIPT.as_bytes(), std::time::Duration::from_secs(8))
+        .await
+        .map_err(err)?;
+    let mut sample = stats::parse(&out);
+    sample.at = Some(std::time::Instant::now());
+    let mut prev = conn.stats_prev.lock().unwrap();
+    let result = stats::compute(prev.as_ref(), &sample);
+    *prev = Some(sample);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -823,6 +840,7 @@ pub fn run() {
             ssh_share,
             telnet_connect,
             serial_ports,
+            ssh_stats,
             serial_connect,
             stream_open,
             stream_write,

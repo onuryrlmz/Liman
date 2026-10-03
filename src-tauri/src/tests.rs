@@ -3,6 +3,11 @@
 //! LIMAN_TEST_SSH="127.0.0.1:2222:kullanici:/yol/ozel_anahtar" cargo test
 //!
 //! Değişken tanımlı değilse SSH testleri atlanır.
+//!
+//! Testler paralel bağlandığı için sshd_config'te `MaxStartups 100` olmalı; OpenSSH'ın
+//! varsayılanı (10) aynı anda gelen bağlantıların bazılarını rastgele düşürür. OpenSSH 9.8+
+//! için `PerSourcePenalties no` da gerekir: anahtarı bilerek reddeden test, kimlik
+//! doğrulamadan kopan bağlantı sayıldığından kaynak adresi geçici olarak engellenir.
 
 use std::{
     sync::{Arc, Mutex},
@@ -1044,5 +1049,75 @@ async fn raw_streams_direct_and_over_ssh() {
     streams.write("b", b"tunelden".to_vec()).unwrap();
     out.wait_for("tunelden").await;
     streams.close("b");
+    term.conn.disconnect().await;
+}
+
+#[test]
+fn parses_linux_server_stats() {
+    use crate::stats::{compute, parse};
+    let sample = |cpu: &str, rx: u64, tx: u64| {
+        format!(
+            "@os\nLinux\n@cpu\n{cpu}\n@mem\nMemTotal:       16303544 kB\nMemFree:         1203544 kB\nMemAvailable:    8151772 kB\nBuffers:          300000 kB\nCached:          5000000 kB\nSwapTotal:       2097148 kB\nSwapFree:        1048574 kB\n@load\n0.52 0.41 0.30 2/812 31337\n@uptime\n356521.42\n@ncpu\n8\n@net\n    lo: 999999 100 0 0 0 0 0 0 999999 100 0 0 0 0 0 0\n  eth0: {rx} 2000 0 0 0 0 0 0 {tx} 1500 0 0 0 0 0 0\n docker0: 1000 10 0 0 0 0 0 0 2000 10 0 0 0 0 0 0\n@df\nFilesystem     1024-blocks      Used Available Capacity Mounted on\n/dev/sda1        102400000  61440000  40960000      60% /\ntmpfs              8151772         0   8151772       0% /dev/shm\n/dev/loop3           56832     56832         0     100% /snap/core/1\n/dev/sdb1        512000000 128000000 384000000      25% /srv/veri alanı\nnas:/export      1000000   500000    500000      50% /mnt/nas\n"
+        )
+    };
+    let mut a = parse(&sample("cpu  1000 0 1000 7000 1000 0 0 0 0 0", 1_000_000, 500_000));
+    a.at = Some(std::time::Instant::now());
+    assert_eq!(a.os, "Linux");
+    assert_eq!(a.mem_total, 16303544 * 1024);
+    assert_eq!(a.mem_used, (16303544 - 8151772) * 1024);
+    assert_eq!(a.swap_used, (2097148 - 1048574) * 1024);
+    assert_eq!(a.load, Some([0.52, 0.41, 0.30]));
+    assert_eq!(a.uptime, Some(356521));
+    assert_eq!(a.ncpu, Some(8));
+    let mounts: Vec<_> = a.disks.iter().map(|d| d.mount.as_str()).collect();
+    assert_eq!(mounts, ["/", "/srv/veri alanı", "/mnt/nas"], "tmpfs ve snap döngüleri elenir, boşluklu yol korunur");
+
+    // İlk ölçümde CPU ve ağ hızı bilinmez.
+    let first = compute(None, &a);
+    assert_eq!(first.cpu, None);
+    assert_eq!(first.net_rx, None);
+    assert_eq!(first.disk.as_ref().unwrap().mount, "/");
+    assert_eq!(first.disk.as_ref().unwrap().used, 61440000 * 1024);
+
+    // 2 sn sonra: toplam +1000 jiffy, boşta (idle+iowait) +250 → %75; eth0+docker0 hızları.
+    let mut b = parse(&sample("cpu  1500 0 1250 7200 1050 0 0 0 0 0", 1_000_000 + 4_000, 500_000 + 2_000));
+    b.at = Some(a.at.unwrap() + Duration::from_secs(2));
+    let s = compute(Some(&a), &b);
+    assert!((s.cpu.unwrap() - 75.0).abs() < 0.01, "{:?}", s.cpu);
+    assert!((s.net_rx.unwrap() - 2000.0).abs() < 0.01);
+    assert!((s.net_tx.unwrap() - 1000.0).abs() < 0.01);
+
+    // Sayaç geri giderse (arayüz yeniden başladı) hız gösterilmez.
+    let mut c = parse(&sample("cpu  1600 0 1300 7300 1060 0 0 0 0 0", 10, 10));
+    c.at = Some(b.at.unwrap() + Duration::from_secs(2));
+    assert_eq!(compute(Some(&b), &c).net_rx, None);
+}
+
+#[tokio::test]
+async fn live_server_stats() {
+    use crate::stats::{compute, parse, SCRIPT};
+    let Some(params) = test_params(None) else {
+        return;
+    };
+    let (out, sink) = Output::new();
+    let (on_exit, _) = exit_signal();
+    let term = ssh::connect(params, 80, 24, sink, accept_all(), on_exit).await.unwrap();
+    let run = || term.conn.exec_capture("sh -s", SCRIPT.as_bytes(), Duration::from_secs(8));
+    let mut a = parse(&run().await.unwrap());
+    a.at = Some(std::time::Instant::now());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let raw = run().await.unwrap();
+    let mut b = parse(&raw);
+    b.at = Some(std::time::Instant::now());
+    let s = compute(Some(&a), &b);
+    eprintln!("{s:#?}");
+    assert!(!s.os.is_empty(), "{raw}");
+    assert!(s.cpu.is_some_and(|c| (0.0..=100.0).contains(&c)), "{raw}");
+    assert!(s.mem_total > 0 && s.mem_used > 0 && s.mem_used <= s.mem_total, "{raw}");
+    assert!(s.load.is_some() && s.uptime.is_some_and(|u| u > 0) && s.ncpu.is_some_and(|n| n > 0), "{raw}");
+    let d = s.disk.expect("ana disk yok");
+    assert!(d.total > 0 && d.used <= d.total);
+    // Ölçüm kabuğa hiçbir şey yazmamalı.
+    assert!(!out.text().contains("@os"));
     term.conn.disconnect().await;
 }

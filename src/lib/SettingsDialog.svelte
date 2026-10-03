@@ -94,6 +94,10 @@
       <label class="check"><input type="checkbox" checked={s.copyOnSelect} onchange={(e) => settings.update({ copyOnSelect: e.currentTarget.checked })} /> Seçilen metni otomatik kopyala</label>
       <label class="check"><input type="checkbox" checked={s.rightClickPaste} onchange={(e) => settings.update({ rightClickPaste: e.currentTarget.checked })} /> Sağ tıkla yapıştır</label>
       <label class="check">
+        <input type="checkbox" checked={s.serverStats} onchange={(e) => settings.update({ serverStats: e.currentTarget.checked })} />
+        <span>Alt çubukta sunucunun CPU, RAM ve disk durumunu göster <small>SSH bağlantısı üzerinden {s.statsInterval} sn'de bir ölçülür (Linux ve macOS sunucular)</small></span>
+      </label>
+      <label class="check">
         <input type="checkbox" checked={s.autoReconnect} onchange={(e) => settings.update({ autoReconnect: e.currentTarget.checked })} />
         <span>Kopan SSH bağlantılarına otomatik yeniden bağlan <small>Ağ değişince ya da bilgisayar uykudan uyanınca</small></span>
       </label>

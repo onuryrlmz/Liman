@@ -19,6 +19,7 @@ Tauri 2 (Rust) + Svelte 5 + xterm.js.
 - İçe aktarma: `~/.ssh/config` ve MobaXterm (`.mxtsessions` / `MobaXterm.ini`)
 - Kopan bağlantılara otomatik yeniden bağlanma
 - Terminalde arama (⌘F / Ctrl+Shift+F), yakınlaştırma (⌘ + / − / 0), temalar ve yazı tipi ayarları
+- Alt çubukta bağlı sunucunun CPU, RAM, disk, yük, ağ hızı ve açık kalma süresi (Linux ve macOS sunucular)
 - Otomatik güncelleme (GitHub Releases üzerinden, imzalı)
 - Bölünmüş ekran: bir sekmede yan yana / alt alta panolar; SSH panoları aynı bağlantıyı paylaşır
 - MultiExec: yazılanı sekmedeki tüm panolara ya da tüm sekmelere gönderme
@@ -66,7 +67,8 @@ npm run tauri dev      # geliştirme
 npm run tauri build    # kurulum paketi (.dmg / .msi / .deb / .AppImage)
 ```
 
-Testler (SSH testleri için bir sshd gerekir, yoksa atlanır):
+Testler (SSH testleri için bir sshd gerekir, yoksa atlanır; sshd_config'te paralel bağlantılar
+için `MaxStartups 100` ve `PerSourcePenalties no` olmalı):
 
 ```sh
 cd src-tauri

@@ -11,6 +11,7 @@
   import SettingsDialog from "$lib/SettingsDialog.svelte";
   import SnippetList from "$lib/SnippetList.svelte";
   import LocalPanel from "$lib/LocalPanel.svelte";
+  import ServerStats from "$lib/ServerStats.svelte";
   import VncView from "$lib/VncView.svelte";
   import RdpView from "$lib/RdpView.svelte";
   import { fileDrag } from "$lib/file-drag.svelte";
@@ -564,7 +565,8 @@
   </div>
 
   <footer class="status">
-    <span>{describe(active)}</span>
+    <span class="desc">{describe(active)}</span>
+    <ServerStats termId={active && (active.kind === "ssh" || active.kind === "sftp") && active.status === "open" ? active.termId : null} />
     <span class="spacer"></span>
     {#if !updater.dismissed && (updater.state.kind === "available" || updater.state.kind === "downloading" || updater.state.kind === "ready")}
       <span class="update">
@@ -1242,6 +1244,12 @@
     font-size: 11.5px;
     white-space: nowrap;
     overflow: hidden;
+  }
+  .status .desc {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .spacer {
     flex: 1;

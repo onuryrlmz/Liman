@@ -1,6 +1,6 @@
 {
   "name": "liman",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "SSH, SFTP ve terminal için tek liman",
   "type": "module",
   "scripts": {

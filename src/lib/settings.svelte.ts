@@ -162,6 +162,10 @@ export interface Settings {
   openFilesWith: "internal" | "external";
   /** Yerel editör uygulaması (boşsa sistemin varsayılanı), örn. "Visual Studio Code". */
   externalEditor: string;
+  /** Alt çubukta bağlı sunucunun CPU/RAM/disk durumu. */
+  serverStats: boolean;
+  /** Ölçüm aralığı (sn). */
+  statsInterval: number;
 }
 
 export const defaults: Settings = {
@@ -182,6 +186,8 @@ export const defaults: Settings = {
   sftpDual: true,
   openFilesWith: "internal",
   externalEditor: "",
+  serverStats: true,
+  statsInterval: 3,
 };
 
 export const MIN_FONT = 8;

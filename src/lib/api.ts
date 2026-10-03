@@ -49,6 +49,22 @@ export interface Snippet {
   run: boolean;
 }
 
+export interface ServerStats {
+  os: string;
+  cpu: number | null;
+  ncpu: number | null;
+  memTotal: number;
+  memUsed: number;
+  swapTotal: number;
+  swapUsed: number;
+  load: [number, number, number] | null;
+  uptime: number | null;
+  netRx: number | null;
+  netTx: number | null;
+  disk: { mount: string; total: number; used: number } | null;
+  disks: { mount: string; total: number; used: number }[];
+}
+
 export interface HostKeyQuestion {
   id: string;
   host: string;
@@ -169,6 +185,7 @@ export const api = {
   sessionPassword: (sessionId: string) => invoke<string | null>("session_password", { sessionId }),
   rdpPrepare: (host: string, port: number, username: string, via: string | null) =>
     invoke<[string, string]>("rdp_prepare", { host, port, username, via }),
+  sshStats: (id: string) => invoke<ServerStats>("ssh_stats", { id }),
   hostKeyAnswer: (id: string, accept: boolean) => invoke<void>("host_key_answer", { id, accept }),
   importPreview: (source: "ssh-config" | "mobaxterm", path: string | null) =>
     invoke<ImportPreview>("import_preview", { source, path }),
