@@ -162,6 +162,9 @@ export interface Settings {
   sftpSplit: number;
   /** Çift panelde uzak panel solda. */
   sftpSwap: boolean;
+  /** Dosya panellerinde sıralama (klasörler her zaman üstte). */
+  sortLocal: { key: "name" | "size" | "mtime"; desc: boolean };
+  sortRemote: { key: "name" | "size" | "mtime"; desc: boolean };
   /** Çift tıklanan uzak dosya: Liman'ın editörü ya da bilgisayardaki uygulama. */
   openFilesWith: "internal" | "external";
   /** Yerel editör uygulaması (boşsa sistemin varsayılanı), örn. "Visual Studio Code". */
@@ -190,6 +193,8 @@ export const defaults: Settings = {
   sftpDual: true,
   sftpSplit: 0.5,
   sftpSwap: false,
+  sortLocal: { key: "name", desc: false },
+  sortRemote: { key: "name", desc: false },
   openFilesWith: "internal",
   externalEditor: "",
   serverStats: true,

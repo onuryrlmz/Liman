@@ -1,6 +1,6 @@
 [package]
 name = "liman"
-version = "0.7.1"
+version = "0.7.2"
 description = "SSH, SFTP ve yerel terminal istemcisi"
 authors = ["onuryrlmz"]
 edition = "2021"

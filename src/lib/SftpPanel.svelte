@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import { open, ask } from "@tauri-apps/plugin-dialog";
   import { join } from "@tauri-apps/api/path";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -12,6 +12,7 @@
   import { settings } from "./settings.svelte";
   import { openPath } from "@tauri-apps/plugin-opener";
   import { fileDrag } from "./file-drag.svelte";
+  import { sortEntries, toggleSort, clickSel, keySel, type SortKey } from "./file-list";
 
   /** wide: ana alanda tam ekran (yalnızca SFTP sekmesi); tarih ve izin sütunları da görünür. */
   /** localDir: çift panelde yerel klasör; indirmeler oraya gider ve sürükle-bırak açılır. */
@@ -38,7 +39,8 @@
   let panel: HTMLDivElement;
   let unlistenDrop: (() => void) | undefined;
 
-  const visible = $derived(showHidden ? entries : entries.filter((e) => !e.name.startsWith(".")));
+  const sort = $derived(settings.value.sortRemote);
+  const visible = $derived(sortEntries(showHidden ? entries : entries.filter((e) => !e.name.startsWith(".")), sort));
   const selectedEntries = $derived(entries.filter((e) => selected.has(e.path)));
 
   /** Klasörü listeler; başarılıysa `true`. */
@@ -230,21 +232,25 @@
     }
   }
 
-  let lastClicked: string | null = null;
+  // Seçim: Explorer/Finder gibi (Ctrl/Cmd+tık, Shift+tık, oklar, Ctrl/Cmd+A, Esc).
+  let anchor: string | null = null;
+  let cursor = $state<string | null>(null);
+  let listEl = $state<HTMLDivElement>();
+  const order = $derived(visible.map((e) => e.path));
+
   function click(ev: MouseEvent, e: Entry) {
-    if (ev.metaKey || ev.ctrlKey) {
-      const s = new Set(selected);
-      s.has(e.path) ? s.delete(e.path) : s.add(e.path);
-      selected = s;
-    } else if (ev.shiftKey && lastClicked) {
-      const i = visible.findIndex((x) => x.path === lastClicked);
-      const j = visible.findIndex((x) => x.path === e.path);
-      const [a, b] = i < j ? [i, j] : [j, i];
-      selected = new Set(visible.slice(a, b + 1).map((x) => x.path));
-    } else {
-      selected = new Set([e.path]);
-    }
-    lastClicked = e.path;
+    ({ selected, anchor, cursor } = clickSel({ selected, anchor, cursor }, ev, e.path, order));
+  }
+
+  function setSort(k: SortKey) {
+    settings.update({ sortRemote: toggleSort(sort, k) });
+  }
+
+  const arrow = (k: SortKey) => (sort.key === k ? (sort.desc ? " ↓" : " ↑") : "");
+
+  async function scrollToCursor() {
+    await tick();
+    if (cursor) listEl?.querySelector(`[data-path="${CSS.escape(cursor)}"]`)?.scrollIntoView({ block: "nearest" });
   }
 
   function context(ev: MouseEvent, e: Entry | null) {
@@ -280,11 +286,26 @@
             null,
             { label: "Yenile", icon: "refresh", action: () => load(path) },
             { label: showHidden ? "Gizli dosyaları gizle" : "Gizli dosyaları göster", action: () => (showHidden = !showHidden) },
+            null,
+            ...(["name", "size", "mtime"] as SortKey[]).map((k) => ({
+              label: `Sırala: ${{ name: "Ad", size: "Boyut", mtime: "Değiştirilme" }[k]}${arrow(k)}`,
+              icon: sort.key === k ? "check" : undefined,
+              action: () => setSort(k),
+            })),
           ],
     };
   }
 
   function onKey(ev: KeyboardEvent) {
+    if (!renaming && !creating) {
+      const r = keySel({ selected, anchor, cursor }, ev, order, 15);
+      if (r) {
+        ev.preventDefault();
+        ({ selected, anchor, cursor } = r);
+        scrollToCursor();
+        return;
+      }
+    }
     if (renaming) return;
     if (ev.key === "Delete" || (ev.key === "Backspace" && ev.metaKey)) remove(selectedEntries);
     else if (ev.key === "Enter" && selectedEntries.length === 1) activate(selectedEntries[0]);
@@ -328,13 +349,13 @@
   <label class="hidden-toggle"><input type="checkbox" bind:checked={showHidden} /> Gizli dosyaları göster</label>
 
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div class="list" tabindex="0" onkeydown={onKey} oncontextmenu={(e) => context(e, null)} role="listbox" aria-label="Dosyalar">
+  <div class="list" bind:this={listEl} tabindex="0" onkeydown={onKey} oncontextmenu={(e) => context(e, null)} role="listbox" aria-label="Dosyalar">
     {#if wide}
-      <div class="row head" aria-hidden="true">
+      <div class="row head">
         <span class="ic"></span>
-        <span class="name">Ad</span>
-        <span class="size">Boyut</span>
-        <span class="date">Değiştirilme</span>
+        <button class="name" onclick={() => setSort("name")} title="Ada göre sırala">Ad{arrow("name")}</button>
+        <button class="size" onclick={() => setSort("size")} title="Boyuta göre sırala">Boyut{arrow("size")}</button>
+        <button class="date" onclick={() => setSort("mtime")} title="Tarihe göre sırala">Değiştirilme{arrow("mtime")}</button>
         <span class="perms">İzinler</span>
       </div>
     {/if}
@@ -364,6 +385,8 @@
       <div
         class="row"
         class:sel={selected.has(e.path)}
+        class:cursor={cursor === e.path}
+        data-path={e.path}
         role="option"
         aria-selected={selected.has(e.path)}
         tabindex="-1"
@@ -478,6 +501,26 @@
   }
   .row.sel {
     background: var(--accent-soft);
+  }
+  .list:focus-within .row.cursor {
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .row:focus {
+    outline: none;
+  }
+  .row.head button {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    text-align: inherit;
+    cursor: pointer;
+  }
+  .row.head button:hover {
+    color: var(--text);
   }
   .ic {
     display: inline-flex;
