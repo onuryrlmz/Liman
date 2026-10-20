@@ -105,6 +105,21 @@ pub fn remove<'a>(
     })
 }
 
+/// Kullanıcının yazdığı yolu mutlak yola çevirir; "~" ve "~/…" ana dizine göredir.
+pub async fn resolve(sftp: &SftpSession, path: &str) -> Result<String> {
+    let p = path.trim();
+    let rel = match p {
+        "" | "~" => ".",
+        _ => p.strip_prefix("~/").unwrap_or(p),
+    };
+    let abs = sftp.canonicalize(rel).await?;
+    // Var olmayan yol bazı sunucularda hata vermeden döner; klasör olduğunu doğrula.
+    if !sftp.metadata(abs.clone()).await?.file_type().is_dir() {
+        bail!("{p} bir klasör değil");
+    }
+    Ok(abs)
+}
+
 pub async fn read_text(sftp: &SftpSession, path: &str) -> Result<String> {
     let meta = sftp.metadata(path).await?;
     if meta.len() > 5 * 1024 * 1024 {

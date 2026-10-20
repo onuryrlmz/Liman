@@ -152,6 +152,10 @@
         await startSavedTunnels();
       }
       if (abandoned()) return;
+      if (tab.kind === "ssh" || tab.kind === "sftp") {
+        const startDir = store.sessions.find((s) => s.id === tab.sessionId)?.startDir?.trim();
+        if (startDir && termId) store.sftpStart[termId] = startDir;
+      }
       reconnectAttempt = 0;
       onUpdate({ status: "open", termId });
       if (fitNow()) api.termResize(termId!, term.cols, term.rows);

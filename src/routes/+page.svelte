@@ -181,6 +181,25 @@
 
   const broadcastKeys = isMac ? { tab: "⇧⌘I", all: "⌥⇧⌘I" } : { tab: "Ctrl+Shift+I", all: "Ctrl+Alt+Shift+I" };
 
+  /** Çift panelli SFTP'de iki panel arasındaki ayırıcıyı sürükleme. */
+  function dragSftpSplit(e: PointerEvent) {
+    e.preventDefault();
+    const box = (e.currentTarget as HTMLElement).parentElement!.getBoundingClientRect();
+    const move = (ev: PointerEvent) => {
+      const left = Math.max(0.2, Math.min(0.8, (ev.clientX - box.left) / box.width));
+      // Oran yerel panelin payıdır; yer değiştirilmişse sol sütun uzak paneldir.
+      settings.update({ sftpSplit: settings.value.sftpSwap ? 1 - left : left });
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
   const splitKeys: Record<SplitDir, string> = isMac ? { row: "⌘D", col: "⇧⌘D" } : { row: "Ctrl+Shift+D", col: "Ctrl+Shift+E" };
 
   // Bölünmüş panolar: konumlar yerleşim ağacından hesaplanır. Terminal bileşenleri
@@ -491,20 +510,48 @@
             <!-- Yalnızca SFTP: bağlıyken terminalin yerine tam ekran dosya tarayıcısı.
                  Bağlantı koparsa terminal (günlük ve "R ile yeniden bağlan") yeniden görünür. -->
             {#if tab.kind === "sftp" && tab.status === "open" && tab.termId}
-              <div class="sftp-pane" class:dual={settings.value.sftpDual}>
+              {@const dual = settings.value.sftpDual}
+              {@const swap = settings.value.sftpSwap}
+              <!-- Sol sütunun oranı: yerel panel solda ise sftpSplit, yer değiştirilmişse tersi. -->
+              {@const left = swap ? 1 - settings.value.sftpSplit : settings.value.sftpSplit}
+              <div
+                class="sftp-pane"
+                class:dual
+                style:grid-template-columns={dual ? `minmax(0, ${left}fr) minmax(0, ${1 - left}fr)` : null}
+              >
                 {#key tab.termId}
-                  {#if settings.value.sftpDual}
-                    <LocalPanel termId={tab.termId} bind:path={() => localPaths[tab.key] ?? "", (v) => (localPaths[tab.key] = v)} />
+                  {#if dual}
+                    <div class="sftp-col" style:order={swap ? 2 : 1}>
+                      <LocalPanel termId={tab.termId} bind:path={() => localPaths[tab.key] ?? "", (v) => (localPaths[tab.key] = v)} />
+                    </div>
                   {/if}
-                  <SftpPanel termId={tab.termId} wide localDir={settings.value.sftpDual ? (localPaths[tab.key] ?? null) : null} />
+                  <div class="sftp-col" style:order={swap ? 1 : 2}>
+                    <SftpPanel termId={tab.termId} wide localDir={dual ? (localPaths[tab.key] ?? null) : null} />
+                  </div>
                 {/key}
-                <button
-                  class="dual-toggle"
-                  title={settings.value.sftpDual ? "Yerel paneli gizle" : "Yerel paneli göster"}
-                  onclick={() => settings.update({ sftpDual: !settings.value.sftpDual })}
-                >
-                  <Icon name="sidebar" size={14} />
-                </button>
+                {#if dual}
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div
+                    class="sftp-divider"
+                    style:left="{left * 100}%"
+                    title="Sürükle: boyutlandır · Çift tıkla: eşit böl"
+                    onpointerdown={dragSftpSplit}
+                    ondblclick={() => settings.update({ sftpSplit: 0.5 })}
+                  ></div>
+                {/if}
+                <div class="dual-tools" style:left={dual ? `${left * 100}%` : null} class:single={!dual}>
+                  {#if dual}
+                    <button title="Panellerin yerini değiştir" onclick={() => settings.update({ sftpSwap: !swap })}>
+                      <Icon name="swap" size={14} />
+                    </button>
+                  {/if}
+                  <button
+                    title={dual ? "Yerel paneli gizle" : "Yerel paneli göster"}
+                    onclick={() => settings.update({ sftpDual: !dual })}
+                  >
+                    <Icon name="sidebar" size={14} />
+                  </button>
+                </div>
               </div>
             {/if}
           </div>
@@ -1082,33 +1129,71 @@
   }
   .sftp-pane.dual {
     display: grid;
-    grid-template-columns: 1fr 1fr;
   }
-  .sftp-pane.dual > :global(:first-child) {
-    border-right: 1px solid var(--border);
+  /* minmax(0, …) ve min-width: 0 olmadan uzun dosya adları bir sütunu genişletip
+     diğerini ezer (issue #2'deki görüntü). */
+  .sftp-pane .sftp-col {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
   }
-  .dual-toggle {
+  .sftp-pane:not(.dual) .sftp-col {
     position: absolute;
-    left: 50%;
-    bottom: 10px;
-    transform: translateX(-50%);
-    display: grid;
-    place-items: center;
-    width: 26px;
-    height: 22px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--panel-2);
-    color: var(--muted);
-    cursor: pointer;
+    inset: 0;
   }
-  .sftp-pane:not(.dual) .dual-toggle {
-    left: auto;
+  .sftp-divider {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 9px;
+    margin-left: -4px;
+    z-index: 3;
+    cursor: col-resize;
+  }
+  .sftp-divider::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--border);
+  }
+  .sftp-divider:hover::after {
+    width: 2px;
+    background: var(--accent);
+  }
+  .dual-tools {
+    position: absolute;
+    bottom: 10px;
+    z-index: 4;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    transform: translateX(-50%);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--panel-2);
+  }
+  .dual-tools.single {
     right: 12px;
     transform: none;
   }
-  .dual-toggle:hover {
+  .dual-tools button {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 20px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .dual-tools button:hover {
     color: var(--text);
+    background: var(--hover);
   }
   .file-ghost {
     position: fixed;

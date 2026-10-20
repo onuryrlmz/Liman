@@ -22,6 +22,8 @@ export interface Session {
   baud?: number | null;
   /** SSH: sunucudaki grafik uygulamaları bu bilgisayarda aç. */
   x11?: boolean;
+  /** SFTP tarayıcısının açılacağı klasör; boşsa ana dizin. */
+  startDir?: string | null;
 }
 
 export interface ConnectRequest {
@@ -197,6 +199,7 @@ export const api = {
   sessionsImport: (path: string, password: string | null) => invoke<ImportResult>("sessions_import", { path, password }),
 
   sftpHome: (id: string) => invoke<string>("sftp_home", { id }),
+  sftpResolve: (id: string, path: string) => invoke<string>("sftp_resolve", { id, path }),
   sftpList: (id: string, path: string) => invoke<Entry[]>("sftp_list", { id, path }),
   sftpMkdir: (id: string, path: string) => invoke<void>("sftp_mkdir", { id, path }),
   sftpRename: (id: string, from: string, to: string) => invoke<void>("sftp_rename", { id, from, to }),

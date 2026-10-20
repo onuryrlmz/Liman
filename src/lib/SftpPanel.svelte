@@ -41,7 +41,8 @@
   const visible = $derived(showHidden ? entries : entries.filter((e) => !e.name.startsWith(".")));
   const selectedEntries = $derived(entries.filter((e) => selected.has(e.path)));
 
-  async function load(p: string) {
+  /** Klasörü listeler; başarılıysa `true`. */
+  async function load(p: string): Promise<boolean> {
     loading = true;
     error = "";
     try {
@@ -51,9 +52,11 @@
       pathInput = p;
       selected = new Set();
       store.sftpPaths[termId] = p;
+      return true;
     } catch (e) {
       error = errText(e);
       pathInput = path;
+      return false;
     } finally {
       loading = false;
     }
@@ -61,7 +64,17 @@
 
   onMount(async () => {
     try {
-      await load(path || (await api.sftpHome(termId)));
+      // Önceki klasör > oturumun başlangıç klasörü > ana dizin.
+      const start = store.sftpStart[termId];
+      let opened = !!path && (await load(path));
+      if (!opened && start) {
+        try {
+          opened = await load(await api.sftpResolve(termId, start));
+        } catch (e) {
+          store.notify(`Başlangıç klasörü açılamadı (${start}): ${errText(e)}`, "error");
+        }
+      }
+      if (!opened) await load(await api.sftpHome(termId));
     } catch (e) {
       error = errText(e);
     }
@@ -289,6 +302,7 @@
   data-file-group={termId}
 >
   <div class="toolbar">
+    {#if localDir !== null}<span class="side-label">Sunucu</span>{/if}
     <button class="icon-btn" title="Üst klasör" onclick={() => load(parentPath(path))}><Icon name="up" /></button>
     <button class="icon-btn" title="Ev klasörü" onclick={async () => load(await api.sftpHome(termId))}><Icon name="home" /></button>
     <button class="icon-btn" title="Yenile" onclick={() => load(path)}><Icon name="refresh" /></button>
@@ -408,6 +422,8 @@
 
 <style>
   .sftp {
+    /* Panel daraldıkça önce izin, sonra tarih sütunu gizlenir; ad sütunu hep görünür. */
+    container-type: inline-size;
     position: relative;
     display: flex;
     flex-direction: column;
@@ -471,8 +487,27 @@
   .ic.dir {
     color: #e5c07b;
   }
+  .side-label {
+    margin-right: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+  }
+  @container (max-width: 560px) {
+    .wide .perms {
+      display: none;
+    }
+  }
+  @container (max-width: 400px) {
+    .wide .date {
+      display: none;
+    }
+  }
   .name {
     flex: 1;
+    min-width: 70px;
     overflow: hidden;
     text-overflow: ellipsis;
   }

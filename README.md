@@ -67,12 +67,13 @@ npm run tauri dev      # geliştirme
 npm run tauri build    # kurulum paketi (.dmg / .msi / .deb / .AppImage)
 ```
 
-Testler (SSH testleri için bir sshd gerekir, yoksa atlanır; sshd_config'te paralel bağlantılar
-için `MaxStartups 100` ve `PerSourcePenalties no` olmalı):
+Testler (SSH testleri için bir sshd gerekir, yoksa atlanır). `scripts/test-sshd.sh`
+root gerektirmeyen geçici bir sshd (127.0.0.1:2222) başlatır:
 
 ```sh
-cd src-tauri
-LIMAN_TEST_SSH="127.0.0.1:22:kullanici:/yol/ozel_anahtar" cargo test
+export LIMAN_TEST_SSH=$(scripts/test-sshd.sh)
+cd src-tauri && cargo test
+../scripts/test-sshd.sh stop
 ```
 
 Yerel paket derlemesi güncelleme imzası ister:

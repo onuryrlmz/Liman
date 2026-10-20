@@ -167,6 +167,14 @@ async fn ssh_shell_sftp_and_tunnel() {
     sftp::write_text(s, &file, "şğü merhaba\n").await.unwrap();
     assert_eq!(sftp::read_text(s, &file).await.unwrap(), "şğü merhaba\n");
 
+    // Başlangıç klasörü: "~/…", mutlak yol; olmayan yol ve dosya reddedilir.
+    let name = dir.rsplit('/').next().unwrap();
+    assert_eq!(sftp::resolve(s, &format!("~/{name}")).await.unwrap(), dir);
+    assert_eq!(sftp::resolve(s, &dir).await.unwrap(), dir);
+    assert_eq!(sftp::resolve(s, "~").await.unwrap(), home);
+    assert!(sftp::resolve(s, &format!("{dir}/yok/boyle")).await.is_err());
+    assert!(sftp::resolve(s, &file).await.is_err(), "dosya başlangıç klasörü olamaz");
+
     let listed = sftp::list(s, &dir).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "merhaba.txt");
@@ -301,6 +309,7 @@ fn session(name: &str, folder: Option<&str>, auth: store::AuthKind) -> store::Se
         has_secret: false,
         kind: store::SessionKind::Ssh,
         jump: None,
+        start_dir: None,
         x11: false,
         baud: None,
         tunnels: vec![],

@@ -158,6 +158,10 @@ export interface Settings {
   logTimestamps: boolean;
   /** Yalnızca-SFTP sekmesinde solda yerel dosyalar. */
   sftpDual: boolean;
+  /** Çift panelde yerel panelin genişlik oranı (0.2–0.8). */
+  sftpSplit: number;
+  /** Çift panelde uzak panel solda. */
+  sftpSwap: boolean;
   /** Çift tıklanan uzak dosya: Liman'ın editörü ya da bilgisayardaki uygulama. */
   openFilesWith: "internal" | "external";
   /** Yerel editör uygulaması (boşsa sistemin varsayılanı), örn. "Visual Studio Code". */
@@ -184,6 +188,8 @@ export const defaults: Settings = {
   logDir: "",
   logTimestamps: true,
   sftpDual: true,
+  sftpSplit: 0.5,
+  sftpSwap: false,
   openFilesWith: "internal",
   externalEditor: "",
   serverStats: true,

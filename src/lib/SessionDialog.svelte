@@ -85,6 +85,7 @@
           port: Number(form.port) || 22,
           jump: !isSsh && !isDesktop ? null : jumpMode === "custom" ? jumpCustom.trim() || null : jumpMode || null,
           x11: form.kind === "ssh" ? !!form.x11 : false,
+          startDir: isSsh ? form.startDir?.trim() || null : null,
           baud: form.kind === "serial" ? Number(form.baud) || 115200 : null,
         },
         forget ? "" : secret ? secret : null,
@@ -188,6 +189,10 @@
         <input type="checkbox" bind:checked={forget} /> Kayıtlı parolayı sil
       </label>
     {/if}
+    <label class="full">
+      <span>Başlangıç klasörü (SFTP)</span>
+      <input bind:value={form.startDir} placeholder="boşsa ana dizin — örn. /var/www/proje ya da ~/proje" spellcheck="false" />
+    </label>
     {#if form.kind === "ssh"}
       <label class="check full">
         <input type="checkbox" bind:checked={form.x11} />
@@ -321,6 +326,10 @@
   small {
     color: var(--muted);
     font-size: 11px;
+  }
+  label.check small {
+    display: block;
+    margin-top: 2px;
   }
   .row {
     display: flex;

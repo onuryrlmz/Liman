@@ -617,6 +617,13 @@ async fn sftp_home(state: State<'_, AppState>, id: String) -> CmdResult<String> 
 }
 
 #[tauri::command]
+async fn sftp_resolve(state: State<'_, AppState>, id: String, path: String) -> CmdResult<String> {
+    let conn = state.conn(&id)?;
+    let s = conn.sftp().await.map_err(err)?;
+    sftp::resolve(s, &path).await.map_err(err)
+}
+
+#[tauri::command]
 async fn sftp_list(
     state: State<'_, AppState>,
     id: String,
@@ -874,6 +881,7 @@ pub fn run() {
             import_sessions,
             sftp_home,
             sftp_list,
+            sftp_resolve,
             sftp_mkdir,
             sftp_rename,
             sftp_remove,

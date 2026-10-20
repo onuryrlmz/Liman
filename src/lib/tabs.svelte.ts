@@ -103,6 +103,8 @@ class Store {
   transfers = $state<Transfer[]>([]);
   /** SSH sekmesi başına SFTP klasörü (termId → yol). */
   sftpPaths = $state<Record<string, string>>({});
+  /** Oturumda tanımlı başlangıç klasörü (termId → kullanıcının yazdığı yol). */
+  sftpStart: Record<string, string> = {};
   toast = $state<{ text: string; kind: "info" | "error" } | null>(null);
   /** MultiExec: yazılanlar etkin sekmenin tüm panolarına ya da tüm sekmelere de gider. */
   broadcast = $state<"off" | "tab" | "all">("off");

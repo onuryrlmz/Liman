@@ -61,6 +61,9 @@ pub struct Session {
     /// Atlama sunucusu: kayıtlı bir oturumun kimliği ya da "kullanıcı@sunucu:port".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jump: Option<String>,
+    /// SFTP tarayıcısının açılacağı klasör (boşsa ana dizin); "~/proje" gibi yazılabilir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_dir: Option<String>,
     /// SSH oturumunda X11 yönlendirme.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub x11: bool,

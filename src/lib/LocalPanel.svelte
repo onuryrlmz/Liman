@@ -280,6 +280,7 @@
 
 <style>
   .local {
+    container-type: inline-size;
     position: relative;
     display: flex;
     flex-direction: column;
@@ -371,8 +372,14 @@
   .ic.dir {
     color: #e5c07b;
   }
+  @container (max-width: 420px) {
+    .date {
+      display: none;
+    }
+  }
   .name {
     flex: 1;
+    min-width: 70px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
