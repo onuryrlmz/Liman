@@ -1,6 +1,6 @@
 #!/bin/bash
 # Mac paketlerini yerelde derleyip GitHub release'ini oluşturur. Windows ve Linux paketlerini
-# ve tam latest.json'u etiket üzerine GitHub Actions ekler.
+# Mac güncelleme paketini ve latest.json'u etiket üzerine GitHub Actions ekler.
 #
 # Kullanım: scripts/mac-release.sh <sürüm> <notlar.md>
 # Gerekenler: ~/.tauri/liman.key (güncelleme imza anahtarı), gh ile oturum açılmış olması.
@@ -25,18 +25,8 @@ grep -q "<string>$V</string>" $A/Liman.app/Contents/Info.plist
 grep -q "<string>$V</string>" $U/Liman.app/Contents/Info.plist
 mkdmg $A/Liman.app "$W/Liman_${V}_aarch64.dmg"
 mkdmg $U/Liman.app "$W/Liman_${V}_universal.dmg"
-cp $U/Liman.app.tar.gz "$W/Liman_universal.app.tar.gz"
-cp $U/Liman.app.tar.gz.sig "$W/Liman_universal.app.tar.gz.sig"
-# Actions bitene kadar Mac'ler güncellemeyi görsün diye geçici latest.json.
-python3 - "$W" "$V" <<'PY'
-import json, sys, datetime
-w, v = sys.argv[1], sys.argv[2]
-e = {"signature": open(f"{w}/Liman_universal.app.tar.gz.sig").read().strip(),
-     "url": f"https://github.com/onuryrlmz/Liman/releases/download/v{v}/Liman_universal.app.tar.gz"}
-json.dump({"version": v, "notes": f"Liman {v}", "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "platforms": {k: e for k in ["darwin-aarch64", "darwin-x86_64", "darwin-aarch64-app", "darwin-x86_64-app"]}},
-          open(f"{w}/latest.json", "w"), indent=2)
-PY
+# Güncelleme paketi (Liman_universal.app.tar.gz) ve latest.json'u yalnızca CI yükler. Burada da
+# yüklenirse CI dosyayı değiştirir ama latest.json'da yerel imza kalır ve Mac'te güncelleme
+# "signature verification failed" verir (0.7.2'de oldu).
 gh release create "v$V" --repo onuryrlmz/Liman --target main --title "Liman $V" --notes-file "$NOTES" \
-  "$W/Liman_${V}_aarch64.dmg" "$W/Liman_${V}_universal.dmg" "$W/Liman_universal.app.tar.gz" \
-  "$W/Liman_universal.app.tar.gz.sig" "$W/latest.json"
+  "$W/Liman_${V}_aarch64.dmg" "$W/Liman_${V}_universal.dmg"
