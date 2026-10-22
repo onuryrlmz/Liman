@@ -845,7 +845,13 @@ pub fn remote_join(dir: &str, name: &str) -> String {
 }
 
 pub fn local_name(p: &Path) -> String {
-    p.file_name()
+    let name = p
+        .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Finder'dan (sürükle-bırak, pano) gelen yollar ayrışık Unicode'dur (NFD); sunucuda "ğ"
+    // "g + ˘" olarak kalmasın diye birleşik biçime çevrilir.
+    #[cfg(target_os = "macos")]
+    let name = unicode_normalization::UnicodeNormalization::nfc(name.as_str()).collect();
+    name
 }

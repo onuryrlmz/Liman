@@ -1,6 +1,6 @@
 [package]
 name = "liman"
-version = "0.7.2"
+version = "0.7.3"
 description = "SSH, SFTP ve yerel terminal istemcisi"
 authors = ["onuryrlmz"]
 edition = "2021"
@@ -40,6 +40,7 @@ tauri-plugin-updater = "2.13.0"
 tauri-plugin-process = "2.4.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 serialport = { version = "4.10.1", default-features = false }
+clipboard-rs = { version = "0.3.5", default-features = false, features = ["wayland"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
@@ -49,3 +50,6 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+unicode-normalization = "0.1.26"

@@ -4,7 +4,13 @@
   import { api, errText } from "./api";
   import { store } from "./tabs.svelte";
 
-  let { termId, path, onClose }: { termId: string; path: string; onClose: () => void } = $props();
+  /** onOpenExternal: dosya burada açılamazsa (metin değil, çok büyük) varsayılan uygulamayla açar. */
+  let {
+    termId,
+    path,
+    onClose,
+    onOpenExternal,
+  }: { termId: string; path: string; onClose: () => void; onOpenExternal?: () => void } = $props();
 
   let text = $state("");
   let original = $state("");
@@ -59,6 +65,9 @@
     <p class="muted">Yükleniyor…</p>
   {:else if error}
     <p class="err">{error}</p>
+    {#if onOpenExternal}
+      <button class="btn" onclick={onOpenExternal}>Varsayılan uygulamayla aç</button>
+    {/if}
   {:else}
     <!-- svelte-ignore a11y_autofocus -->
     <textarea bind:value={text} onkeydown={onKey} spellcheck="false" autofocus></textarea>

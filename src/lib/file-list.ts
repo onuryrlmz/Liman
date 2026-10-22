@@ -28,6 +28,24 @@ export function toggleSort(cur: Sort, key: SortKey): Sort {
   return { key, desc: key !== "name" };
 }
 
+// Metin olmayan ya da başka bir programda daha rahat açılan dosyalar; çift tıklayınca Liman'ın
+// editörü yerine sistemin varsayılan uygulamasıyla açılır.
+const EXTERNAL = new Set(
+  (
+    "xlsx xlsm xls ods csv tsv docx doc odt rtf pptx ppt odp pdf " +
+    "png jpg jpeg gif bmp webp tif tiff ico heic svg psd " +
+    "mp3 wav flac ogg m4a aac mp4 mkv mov avi webm " +
+    "zip gz tgz bz2 xz 7z rar tar jar war " +
+    "exe msi dll so dylib dmg iso pkg deb rpm apk bin class o " +
+    "db sqlite sqlite3 pcap pcapng"
+  ).split(" "),
+);
+
+export function opensExternally(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && EXTERNAL.has(name.slice(dot + 1).toLowerCase());
+}
+
 export interface SelState {
   selected: Set<string>;
   /** Shift ile aralık seçiminin başlangıcı. */
@@ -37,7 +55,8 @@ export interface SelState {
 }
 
 const isMac = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
-const toggleKey = (ev: MouseEvent | KeyboardEvent) => (isMac ? ev.metaKey : ev.ctrlKey);
+/** Ctrl (Mac'te Cmd). */
+export const toggleKey = (ev: MouseEvent | KeyboardEvent) => (isMac ? ev.metaKey : ev.ctrlKey);
 
 function range(order: string[], from: string | null, to: string): string[] {
   const i = from ? order.indexOf(from) : -1;

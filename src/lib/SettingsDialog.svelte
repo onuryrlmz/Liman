@@ -124,7 +124,8 @@
         </label>
       </div>
       <p class="hint">
-        Editörde kaydettiğiniz her değişiklik sunucuya otomatik yüklenir. Uygulama adı örneği:
+        Editörde kaydettiğiniz her değişiklik sunucuya otomatik yüklenir. Excel, PDF, resim, arşiv gibi
+        metin olmayan dosyalar her zaman sistemin varsayılan uygulamasıyla açılır. Uygulama adı örneği:
         <code>Visual Studio Code</code>, <code>TextEdit</code>, <code>notepad</code>, <code>gedit</code>.
       </p>
       <label class="check"><input type="checkbox" checked={s.sftpDual} onchange={(e) => settings.update({ sftpDual: e.currentTarget.checked })} /> Yalnızca-SFTP sekmesinde yerel dosyaları da göster (çift panel)</label>

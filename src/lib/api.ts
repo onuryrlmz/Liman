@@ -211,6 +211,9 @@ export const api = {
   syncApply: (id: string, local: string, remote: string, actions: { path: string; direction: "upload" | "download" }[]) =>
     invoke<number>("sync_apply", { id, local, remote, actions }),
   sftpEditLocal: (id: string, remote: string) => invoke<string>("sftp_edit_local", { id, remote }),
+  clipDir: () => invoke<string>("clip_dir"),
+  clipboardSetFiles: (paths: string[]) => invoke<void>("clipboard_set_files", { paths }),
+  clipboardGetFiles: () => invoke<string[]>("clipboard_get_files"),
   sftpDownload: (id: string, remote: string, local: string, transferId: string) =>
     invoke<void>("sftp_download", { id, remote, local, transferId }),
   sftpUpload: (id: string, local: string, remoteDir: string, transferId: string) =>

@@ -1,4 +1,5 @@
 mod backup;
+mod clipfiles;
 mod importers;
 mod local;
 mod raw;
@@ -690,6 +691,28 @@ struct EditSync {
     error: Option<String>,
 }
 
+/// Panoya kopyalanacak uzak dosyaların indirileceği geçici klasör.
+#[tauri::command]
+fn clip_dir() -> CmdResult<String> {
+    Ok(clipfiles::temp_dir().map_err(err)?.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+async fn clipboard_set_files(paths: Vec<String>) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || clipfiles::set_files(paths))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn clipboard_get_files() -> CmdResult<Vec<String>> {
+    tauri::async_runtime::spawn_blocking(clipfiles::get_files)
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
 /// Uzak dosyayı yerel editörde açmak için indirir ve kaydedildikçe geri yükler.
 #[tauri::command]
 async fn sftp_edit_local(
@@ -889,6 +912,9 @@ pub fn run() {
             sftp_write_text,
             sftp_download,
             sftp_edit_local,
+            clip_dir,
+            clipboard_set_files,
+            clipboard_get_files,
             sync_compare,
             sync_apply,
             sftp_upload,

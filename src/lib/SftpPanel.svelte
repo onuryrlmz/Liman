@@ -12,7 +12,7 @@
   import { settings } from "./settings.svelte";
   import { openPath } from "@tauri-apps/plugin-opener";
   import { fileDrag } from "./file-drag.svelte";
-  import { sortEntries, toggleSort, clickSel, keySel, type SortKey } from "./file-list";
+  import { sortEntries, toggleSort, clickSel, keySel, opensExternally, toggleKey, type SortKey } from "./file-list";
 
   /** wide: ana alanda tam ekran (yalnızca SFTP sekmesi); tarih ve izin sütunları da görünür. */
   /** localDir: çift panelde yerel klasör; indirmeler oraya gider ve sürükle-bırak açılır. */
@@ -165,6 +165,40 @@
     }
   }
 
+  /** Ctrl/Cmd+C: seçilenleri geçici klasöre indirip dosya olarak panoya koyar (Explorer/Finder'a yapıştırılır). */
+  async function copyToClipboard(items: Entry[]) {
+    if (!items.length) return;
+    const what = items.length === 1 ? items[0].name : `${items.length} öğe`;
+    try {
+      const dir = await api.clipDir();
+      store.notify(`${what} indiriliyor; bitince panoya kopyalanacak`);
+      const locals = await Promise.all(
+        items.map(async (e) => {
+          const id = transferId();
+          const local = await join(dir, e.name);
+          store.upsertTransfer({ id, name: e.name, done: 0, total: 0, state: "run", direction: "down" });
+          await api.sftpDownload(termId, e.path, local, id);
+          return local;
+        }),
+      );
+      await api.clipboardSetFiles(locals);
+      store.notify(`${what} panoya kopyalandı; dosya yöneticisinde yapıştırabilirsiniz`);
+    } catch (err) {
+      store.notify(errText(err), "error");
+    }
+  }
+
+  /** Ctrl/Cmd+V: panodaki dosyaları (Explorer/Finder'dan kopyalanan) bu klasöre yükler. */
+  async function pasteFromClipboard() {
+    try {
+      const files = await api.clipboardGetFiles();
+      if (files.length) uploadPaths(files);
+      else store.notify("Panoda dosya yok");
+    } catch (err) {
+      store.notify(errText(err), "error");
+    }
+  }
+
   function mkdir() {
     newName = "";
     creating = true;
@@ -216,15 +250,19 @@
 
   function activate(e: Entry) {
     if (e.isDir) load(e.path);
-    else if (settings.value.openFilesWith === "external") editLocal(e);
+    else if (settings.value.openFilesWith === "external") openLocal(e, true);
+    else if (opensExternally(e.name)) openLocal(e, false);
     else editing = e.path;
   }
 
-  /** Dosyayı bilgisayardaki editörde açar; kaydedildikçe sunucuya yüklenir. */
-  async function editLocal(e: Entry) {
+  /**
+   * Dosyayı bilgisayarda açar; kaydedildikçe sunucuya yüklenir. `editor`: ayarlardaki editör
+   * uygulaması (boşsa sistem varsayılanı); değilse her zaman sistemin varsayılan uygulaması.
+   */
+  async function openLocal(e: Pick<Entry, "path" | "name">, editor: boolean) {
     try {
       const local = await api.sftpEditLocal(termId, e.path);
-      const app = settings.value.externalEditor.trim() || undefined;
+      const app = (editor && settings.value.externalEditor.trim()) || undefined;
       await openPath(local, app);
       store.notify(`${e.name} açıldı; kaydettikçe sunucuya yüklenecek`);
     } catch (err) {
@@ -263,11 +301,14 @@
     if (single && !single.isDir) {
       fileItems.push(
         { label: "Liman'da düzenle", icon: "edit", action: () => (editing = single.path) },
-        { label: "Bilgisayardaki editörde aç", icon: "file", action: () => editLocal(single) },
+        { label: "Varsayılan uygulamayla aç", icon: "file", action: () => openLocal(single, false) },
       );
+      const editor = settings.value.externalEditor.trim();
+      if (editor) fileItems.push({ label: `${editor} ile aç`, icon: "file", action: () => openLocal(single, true) });
     }
     fileItems.push(
       { label: "İndir…", icon: "download", action: () => download(items) },
+      { label: "Panoya kopyala", icon: "copy", action: () => copyToClipboard(items) },
       null,
       { label: "Yeniden adlandır", icon: "edit", disabled: !single, action: () => single && startRename(single) },
       { label: "Yolu kopyala", icon: "copy", action: () => writeText(items.map((x) => x.path).join("\n")) },
@@ -283,6 +324,7 @@
             { label: "Dosya yükle…", icon: "upload", action: () => uploadFiles() },
             { label: "Klasör yükle…", icon: "upload", action: () => uploadFiles(true) },
             { label: "Yeni klasör", icon: "folderPlus", action: mkdir },
+            { label: "Panodaki dosyaları yapıştır", icon: "upload", action: pasteFromClipboard },
             null,
             { label: "Yenile", icon: "refresh", action: () => load(path) },
             { label: showHidden ? "Gizli dosyaları gizle" : "Gizli dosyaları göster", action: () => (showHidden = !showHidden) },
@@ -306,8 +348,15 @@
         return;
       }
     }
-    if (renaming) return;
-    if (ev.key === "Delete" || (ev.key === "Backspace" && ev.metaKey)) remove(selectedEntries);
+    if (renaming || creating) return;
+    const mod = toggleKey(ev) && !ev.shiftKey && !ev.altKey;
+    if (mod && ev.key.toLowerCase() === "c" && selectedEntries.length) {
+      ev.preventDefault();
+      copyToClipboard(selectedEntries);
+    } else if (mod && ev.key.toLowerCase() === "v") {
+      ev.preventDefault();
+      pasteFromClipboard();
+    } else if (ev.key === "Delete" || (ev.key === "Backspace" && ev.metaKey)) remove(selectedEntries);
     else if (ev.key === "Enter" && selectedEntries.length === 1) activate(selectedEntries[0]);
     else if (ev.key === "Backspace") load(parentPath(path));
     else if (ev.key === "F2" && selectedEntries.length === 1) startRename(selectedEntries[0]);
@@ -440,7 +489,16 @@
   <ContextMenu {...menu} onClose={() => (menu = null)} />
 {/if}
 {#if editing}
-  <EditorDialog {termId} path={editing} onClose={() => (editing = null)} />
+  {@const p = editing}
+  <EditorDialog
+    {termId}
+    path={p}
+    onClose={() => (editing = null)}
+    onOpenExternal={() => {
+      editing = null;
+      openLocal({ path: p, name: p.split("/").pop() ?? p }, false);
+    }}
+  />
 {/if}
 
 <style>

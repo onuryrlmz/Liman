@@ -1130,3 +1130,20 @@ async fn live_server_stats() {
     assert!(!out.text().contains("@os"));
     term.conn.disconnect().await;
 }
+
+#[test]
+fn clip_file_uri_roundtrip() {
+    use crate::clipfiles::{file_uri, percent_decode};
+    let p = "/home/onur/Masaüstü/rapor 2026 (son)%.xlsx";
+    let uri = file_uri(p);
+    assert_eq!(uri, "file:///home/onur/Masa%C3%BCst%C3%BC/rapor%202026%20%28son%29%25.xlsx");
+    assert_eq!(percent_decode(uri.strip_prefix("file://").unwrap()), p);
+    assert_eq!(percent_decode("a%2"), "a%2");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn local_name_is_nfc_on_macos() {
+    let p = std::path::Path::new("/tmp/klaso\u{308}r/rapor g\u{306}u\u{308}s\u{327}.txt");
+    assert_eq!(crate::ssh::local_name(p), "rapor ğüş.txt");
+}

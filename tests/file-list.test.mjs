@@ -49,3 +49,12 @@ assert.equal(k.selected.size, 0);
 assert.equal(keySel(k, ev({ key: "Escape" }), order), null, "boş seçimde Esc işlenmez");
 assert.equal(keySel(k, ev({ key: "x" }), order), null);
 console.log("file-list: tüm testler geçti");
+
+// Varsayılan uygulamayla açılacak dosyalar.
+import { opensExternally } from "../src/lib/file-list.ts";
+assert.equal(opensExternally("rapor.XLSX"), true);
+assert.equal(opensExternally("veri.csv"), true);
+assert.equal(opensExternally("a.tar.gz"), true);
+assert.equal(opensExternally("nginx.conf"), false);
+assert.equal(opensExternally("Makefile"), false);
+assert.equal(opensExternally(".pdf"), false);
