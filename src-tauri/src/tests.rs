@@ -420,6 +420,79 @@ fn export_import_roundtrip_with_secrets() {
 }
 
 #[tokio::test]
+async fn sftp_chmod_scopes() {
+    use sftp::ChmodScope::*;
+    let Some(mut params) = test_params(None) else {
+        return;
+    };
+    params.shell = false;
+    let (_out, sink) = Output::new();
+    let (on_exit, _exited) = exit_signal();
+    let term = ssh::connect(params, 80, 24, sink, accept_all(), on_exit).await.unwrap();
+    let s = term.conn.sftp().await.unwrap();
+    let home = s.canonicalize(".").await.unwrap();
+    let root = ssh::remote_join(&home, &format!("liman-chmod-{}", std::process::id()));
+    let sub = ssh::remote_join(&root, "alt");
+    let f1 = ssh::remote_join(&root, "a.txt");
+    let f2 = ssh::remote_join(&sub, "b.sh");
+    s.create_dir(root.clone()).await.unwrap();
+    s.create_dir(sub.clone()).await.unwrap();
+    sftp::write_text(s, &f1, "a").await.unwrap();
+    sftp::write_text(s, &f2, "b").await.unwrap();
+    // Klasör dışını gösteren bağlantı: özyinelemede hedefi değişmemeli.
+    let outside = ssh::remote_join(&home, &format!("liman-chmod-dis-{}", std::process::id()));
+    sftp::write_text(s, &outside, "x").await.unwrap();
+    let mut a = russh_sftp::protocol::FileAttributes::empty();
+    a.permissions = Some(0o600);
+    s.set_metadata(outside.clone(), a).await.unwrap();
+    // OpenSSH sftp-server SYMLINK argümanlarını ters sırada bekler (hedef, bağlantı).
+    s.symlink(outside.clone(), ssh::remote_join(&root, "link")).await.unwrap();
+    assert!(s.symlink_metadata(ssh::remote_join(&root, "link")).await.unwrap().file_type().is_symlink());
+
+    let mode = |p: &str| {
+        let p = p.to_string();
+        async move { s.metadata(p).await.unwrap().permissions.unwrap() & 0o7777 }
+    };
+
+    // Yalnızca öğenin kendisi.
+    let r = sftp::chmod(s, &f1, 0o640, Item).await.unwrap();
+    assert_eq!((r.changed, r.failed_count), (1, 0));
+    assert_eq!(mode(&f1).await, 0o640);
+    let listed = sftp::list(s, &root).await.unwrap();
+    assert_eq!(listed.iter().find(|e| e.name == "a.txt").unwrap().mode, Some(0o640));
+
+    // Yalnızca dosyalar: klasörler değişmez.
+    let dir_before = mode(&sub).await;
+    let r = sftp::chmod(s, &root, 0o644, Files).await.unwrap();
+    assert_eq!(r.changed, 2);
+    assert_eq!((mode(&f1).await, mode(&f2).await), (0o644, 0o644));
+    assert_eq!(mode(&sub).await, dir_before);
+
+    // Yalnızca klasörler, içerik önce: 0o700 ile kök de dahil.
+    let r = sftp::chmod(s, &root, 0o711, Dirs).await.unwrap();
+    assert_eq!(r.changed, 2);
+    assert_eq!((mode(&root).await, mode(&sub).await, mode(&f2).await), (0o711, 0o711, 0o644));
+
+    // Hepsi; bağlantının hedefi dokunulmadan kalır.
+    let r = sftp::chmod(s, &root, 0o755, All).await.unwrap();
+    assert_eq!((r.changed, r.failed_count), (4, 0));
+    assert_eq!((mode(&root).await, mode(&sub).await, mode(&f1).await, mode(&f2).await), (0o755, 0o755, 0o755, 0o755));
+    assert_eq!(mode(&outside).await, 0o600, "bağlantının hedefi değişmemeli");
+
+    // Seçilen bağlantı: hedefin izni değişir, özyineleme bağlantının içine inmez.
+    let r = sftp::chmod(s, &ssh::remote_join(&root, "link"), 0o640, All).await.unwrap();
+    assert_eq!(r.changed, 1);
+    assert_eq!(mode(&outside).await, 0o640);
+    let listed = sftp::list(s, &root).await.unwrap();
+    assert_eq!(listed.iter().find(|e| e.name == "link").unwrap().mode, Some(0o640), "bağlantının hedefinin izni");
+
+    assert!(sftp::chmod(s, &f1, 0o10000, Item).await.is_err());
+
+    sftp::remove(s, root, true).await.unwrap();
+    s.remove_file(outside).await.unwrap();
+}
+
+#[tokio::test]
 async fn sftp_only_connection() {
     let Some(mut params) = test_params(None) else {
         return;

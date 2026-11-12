@@ -665,6 +665,19 @@ async fn sftp_remove(
 }
 
 #[tauri::command]
+async fn sftp_chmod(
+    state: State<'_, AppState>,
+    id: String,
+    path: String,
+    mode: u32,
+    scope: sftp::ChmodScope,
+) -> CmdResult<sftp::ChmodResult> {
+    let conn = state.conn(&id)?;
+    let s = conn.sftp().await.map_err(err)?;
+    sftp::chmod(s, &path, mode, scope).await.map_err(err)
+}
+
+#[tauri::command]
 async fn sftp_read_text(state: State<'_, AppState>, id: String, path: String) -> CmdResult<String> {
     let conn = state.conn(&id)?;
     let s = conn.sftp().await.map_err(err)?;
@@ -908,6 +921,7 @@ pub fn run() {
             sftp_mkdir,
             sftp_rename,
             sftp_remove,
+            sftp_chmod,
             sftp_read_text,
             sftp_write_text,
             sftp_download,

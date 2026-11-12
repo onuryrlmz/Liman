@@ -24,6 +24,8 @@ pub struct Entry {
     pub size: u64,
     pub mtime: Option<u64>,
     pub perms: String,
+    /// İzin bitleri (setuid/setgid/sticky dahil, 0o7777); sunucu vermediyse yok.
+    pub mode: Option<u32>,
 }
 
 pub fn perms_string(mode: Option<u32>) -> String {
@@ -55,10 +57,13 @@ pub async fn list(sftp: &SftpSession, path: &str) -> Result<Vec<Entry>> {
         let full = remote_join(path, &name);
         let is_link = e.file_type().is_symlink();
         let mut is_dir = e.file_type().is_dir();
+        // chmod bağlantının hedefini değiştirir; izin penceresi hedefin iznini göstersin.
+        let mut mode = meta.permissions;
         if is_link {
             // Bağlantının hedefi klasörse içine girilebilsin.
             if let Ok(target) = sftp.metadata(full.clone()).await {
                 is_dir = target.file_type().is_dir();
+                mode = target.permissions;
             }
         }
         out.push(Entry {
@@ -73,6 +78,7 @@ pub async fn list(sftp: &SftpSession, path: &str) -> Result<Vec<Entry>> {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs()),
             perms: perms_string(meta.permissions),
+            mode: mode.map(|m| m & 0o7777),
         });
     }
     out.sort_by(|a, b| {
@@ -103,6 +109,107 @@ pub fn remove<'a>(
         sftp.remove_dir(path).await?;
         Ok(())
     })
+}
+
+/// Alt öğelere de uygularken hangi türlerin değişeceği.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChmodScope {
+    /// Yalnızca seçilen öğe.
+    Item,
+    /// Seçilen öğe ve altındaki her şey.
+    All,
+    /// Altındaki dosyalar (klasörlerin kendisi değişmez).
+    Files,
+    /// Seçilen klasör ve alt klasörler (dosyalar değişmez).
+    Dirs,
+}
+
+#[derive(Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ChmodResult {
+    pub changed: u64,
+    /// Değiştirilemeyen öğeler: (yol, hata); en fazla 20 tanesi tutulur.
+    pub failed: Vec<(String, String)>,
+    pub failed_count: u64,
+}
+
+impl ChmodResult {
+    fn fail(&mut self, path: &str, e: impl std::fmt::Display) {
+        self.failed_count += 1;
+        if self.failed.len() < 20 {
+            self.failed.push((path.to_string(), e.to_string()));
+        }
+    }
+}
+
+async fn set_mode(sftp: &SftpSession, path: &str, mode: u32, out: &mut ChmodResult) {
+    let mut attrs = russh_sftp::protocol::FileAttributes::empty();
+    attrs.permissions = Some(mode & 0o7777);
+    match sftp.set_metadata(path, attrs).await {
+        Ok(()) => out.changed += 1,
+        Err(e) => out.fail(path, e),
+    }
+}
+
+/// Dosya ya da klasörün izinlerini değiştirir (chmod). Alt öğelere inerken sembolik
+/// bağlantılara dokunulmaz ve içlerine girilmez: setstat bağlantının hedefini değiştirir,
+/// hedef de seçilen klasörün dışında olabilir. Bir öğe başarısız olursa diğerleri sürer.
+pub async fn chmod(sftp: &SftpSession, path: &str, mode: u32, scope: ChmodScope) -> Result<ChmodResult> {
+    if mode > 0o7777 {
+        bail!("Geçersiz izin değeri: {mode:o}");
+    }
+    let mut out = ChmodResult::default();
+    // Seçilen bir bağlantının içine de inilmez; yalnızca hedefinin izni değişir.
+    let is_link = sftp.symlink_metadata(path).await?.file_type().is_symlink();
+    let is_dir = !is_link && sftp.metadata(path).await?.file_type().is_dir();
+    let wants = |dir: bool| match scope {
+        ChmodScope::Item | ChmodScope::All => true,
+        ChmodScope::Files => !dir,
+        ChmodScope::Dirs => dir,
+    };
+    if scope == ChmodScope::Item || !is_dir {
+        if wants(is_dir) {
+            set_mode(sftp, path, mode, &mut out).await;
+        }
+        return Ok(out);
+    }
+    // Önce içerik, sonra klasörün kendisi: klasörden okuma/çalıştırma izni kaldırılıyorsa
+    // içine girilebilmesi için.
+    let mut stack = vec![(path.to_string(), false)];
+    while let Some((dir, visited)) = stack.pop() {
+        if visited {
+            if wants(true) {
+                set_mode(sftp, &dir, mode, &mut out).await;
+            }
+            continue;
+        }
+        stack.push((dir.clone(), true));
+        let entries = match sftp.read_dir(dir.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                out.fail(&dir, e);
+                continue;
+            }
+        };
+        for e in entries {
+            let name = e.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let full = remote_join(&dir, &name);
+            let ft = e.file_type();
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                stack.push((full, false));
+            } else if wants(false) {
+                set_mode(sftp, &full, mode, &mut out).await;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Kullanıcının yazdığı yolu mutlak yola çevirir; "~" ve "~/…" ana dizine göredir.

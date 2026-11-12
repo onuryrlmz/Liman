@@ -64,6 +64,7 @@ pub fn list(path: &str) -> Result<Listing> {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs()),
             perms: crate::sftp::perms_string(mode(&meta)),
+            mode: mode(&meta).map(|m| m & 0o7777),
         });
     }
     entries.sort_by(|a, b| {

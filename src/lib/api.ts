@@ -89,6 +89,8 @@ export interface Entry {
   size: number;
   mtime: number | null;
   perms: string;
+  /** İzin bitleri (0o7777); sunucu vermediyse null. */
+  mode?: number | null;
 }
 
 export type TunnelKind = "local" | "remote" | "socks";
@@ -204,6 +206,8 @@ export const api = {
   sftpMkdir: (id: string, path: string) => invoke<void>("sftp_mkdir", { id, path }),
   sftpRename: (id: string, from: string, to: string) => invoke<void>("sftp_rename", { id, from, to }),
   sftpRemove: (id: string, path: string, isDir: boolean) => invoke<void>("sftp_remove", { id, path, isDir }),
+  sftpChmod: (id: string, path: string, mode: number, scope: import("./perms").ChmodScope) =>
+    invoke<{ changed: number; failed: [string, string][]; failedCount: number }>("sftp_chmod", { id, path, mode, scope }),
   sftpReadText: (id: string, path: string) => invoke<string>("sftp_read_text", { id, path }),
   sftpWriteText: (id: string, path: string, text: string) => invoke<void>("sftp_write_text", { id, path, text }),
   syncCompare: (id: string, local: string, remote: string) =>

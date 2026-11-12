@@ -7,6 +7,7 @@
   import Icon from "./Icon.svelte";
   import ContextMenu, { type MenuItem } from "./ContextMenu.svelte";
   import EditorDialog from "./EditorDialog.svelte";
+  import PermsDialog from "./PermsDialog.svelte";
   import { api, errText, formatDate, formatSize, joinPath, parentPath, type Entry } from "./api";
   import { store } from "./tabs.svelte";
   import { settings } from "./settings.svelte";
@@ -31,6 +32,7 @@
   let showHidden = $state(false);
   let menu = $state<{ x: number; y: number; items: (MenuItem | null)[] } | null>(null);
   let editing = $state<string | null>(null);
+  let permsFor = $state<Entry[] | null>(null);
   let dropping = $state(false);
   let renaming = $state<string | null>(null);
   let renameValue = $state("");
@@ -312,6 +314,7 @@
       null,
       { label: "Yeniden adlandır", icon: "edit", disabled: !single, action: () => single && startRename(single) },
       { label: "Yolu kopyala", icon: "copy", action: () => writeText(items.map((x) => x.path).join("\n")) },
+      { label: "İzinler…", icon: "key", action: () => (permsFor = items) },
       null,
       { label: "Sil", icon: "trash", danger: true, action: () => remove(items) },
     );
@@ -499,6 +502,9 @@
       openLocal({ path: p, name: p.split("/").pop() ?? p }, false);
     }}
   />
+{/if}
+{#if permsFor}
+  <PermsDialog {termId} entries={permsFor} onClose={() => (permsFor = null)} onDone={() => load(path)} />
 {/if}
 
 <style>
