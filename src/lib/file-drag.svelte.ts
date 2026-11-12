@@ -14,6 +14,7 @@ const key = (side: Side, group: string) => `${side}|${group}`;
 class FileDrag {
   drag = $state<{ from: Side; group: string; items: Entry[]; x: number; y: number; over: Side | null } | null>(null);
   private zones = new Map<string, Drop>();
+  private exits = new Map<string, (items: Entry[]) => void>();
   private press: { from: Side; group: string; items: () => Entry[]; x: number; y: number } | null = null;
 
   /** Bırakma bölgesini kaydeder; kaldırmak için dönen fonksiyonu çağırın. */
@@ -22,6 +23,18 @@ class FileDrag {
     this.zones.set(k, onDrop);
     return () => {
       if (this.zones.get(k) === onDrop) this.zones.delete(k);
+    };
+  }
+
+  /**
+   * Bu paneldeki öğeler pencerenin dışına sürüklenince çağrılır (Finder/Explorer'a sürükleme).
+   * İçerideki sürükleme orada biter; işletim sisteminin sürüklemesi devralır.
+   */
+  exit(side: Side, group: string, onExit: (items: Entry[]) => void) {
+    const k = key(side, group);
+    this.exits.set(k, onExit);
+    return () => {
+      if (this.exits.get(k) === onExit) this.exits.delete(k);
     };
   }
 
@@ -50,6 +63,17 @@ class FileDrag {
       const items = this.press.items();
       if (!items.length) return;
       this.drag = { from: this.press.from, group: this.press.group, items, x: 0, y: 0, over: null };
+    }
+    const out = ev.clientX < 0 || ev.clientY < 0 || ev.clientX >= window.innerWidth || ev.clientY >= window.innerHeight;
+    const onExit = out ? this.exits.get(key(this.drag.from, this.drag.group)) : undefined;
+    if (onExit) {
+      const items = this.drag.items;
+      window.removeEventListener("pointermove", this.move);
+      window.removeEventListener("pointerup", this.up);
+      this.press = null;
+      this.drag = null;
+      onExit(items);
+      return;
     }
     const el = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>("[data-file-drop]");
     const over = el?.dataset.fileGroup === this.drag.group ? ((el.dataset.fileDrop as Side | undefined) ?? null) : null;

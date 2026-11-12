@@ -206,6 +206,7 @@ export const api = {
   sftpMkdir: (id: string, path: string) => invoke<void>("sftp_mkdir", { id, path }),
   sftpRename: (id: string, from: string, to: string) => invoke<void>("sftp_rename", { id, from, to }),
   sftpRemove: (id: string, path: string, isDir: boolean) => invoke<void>("sftp_remove", { id, path, isDir }),
+  dragOut: (id: string, items: { path: string; name: string; isDir: boolean }[]) => invoke<void>("drag_out", { id, items }),
   sftpChmod: (id: string, path: string, mode: number, scope: import("./perms").ChmodScope) =>
     invoke<{ changed: number; failed: [string, string][]; failedCount: number }>("sftp_chmod", { id, path, mode, scope }),
   sftpReadText: (id: string, path: string) => invoke<string>("sftp_read_text", { id, path }),

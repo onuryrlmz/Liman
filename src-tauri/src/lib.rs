@@ -1,5 +1,6 @@
 mod backup;
 mod clipfiles;
+mod dragout;
 mod importers;
 mod local;
 mod raw;
@@ -75,7 +76,7 @@ fn on_exit(app: AppHandle, id: String) -> ssh::OnExit {
     })
 }
 
-fn reporter(app: AppHandle, id: String, name: String) -> sftp::Reporter {
+pub(crate) fn reporter(app: AppHandle, id: String, name: String) -> sftp::Reporter {
     sftp::Reporter::new(id, name, move |p| {
         let _ = app.emit("transfer", p);
     })
@@ -704,6 +705,24 @@ struct EditSync {
     error: Option<String>,
 }
 
+/// Seçilen uzak öğeleri pencereden dışarı sürüklemeye başlar; bırakıldıkları yere o an iner.
+/// Ana iş parçacığında çalışmalı (senkron komut), fare hâlâ basılıyken çağrılır.
+#[tauri::command]
+fn drag_out(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: String,
+    items: Vec<dragout::DragItem>,
+) -> CmdResult<()> {
+    let conn = state.conn(&id)?;
+    let sources = items
+        .into_iter()
+        .map(|item| dragout::Source { app: app.clone(), conn: conn.clone(), item })
+        .collect();
+    dragout::start(&window, sources).map_err(err)
+}
+
 /// Panoya kopyalanacak uzak dosyaların indirileceği geçici klasör.
 #[tauri::command]
 fn clip_dir() -> CmdResult<String> {
@@ -922,6 +941,7 @@ pub fn run() {
             sftp_rename,
             sftp_remove,
             sftp_chmod,
+            drag_out,
             sftp_read_text,
             sftp_write_text,
             sftp_download,

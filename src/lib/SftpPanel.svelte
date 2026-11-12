@@ -110,6 +110,15 @@
     return fileDrag.zone("remote", termId, (items) => uploadPaths(items.map((e) => e.path)));
   });
 
+  // Pencereden dışarı sürüklenen öğeler bırakıldıkları yere iner (Finder/Explorer).
+  $effect(() =>
+    fileDrag.exit("remote", termId, (items) => {
+      api
+        .dragOut(termId, items.map((e) => ({ path: e.path, name: e.name, isDir: e.isDir })))
+        .catch((err) => store.notify(`${errText(err)}. Ctrl+C ile kopyalayıp yapıştırabilirsiniz.`, "error"));
+    }),
+  );
+
   // Başka yerden (eşitleme, yerel panel) yapılan yüklemeler bitince listeyi tazele.
   let upDone = 0;
   $effect(() => {
@@ -444,7 +453,7 @@
         tabindex="-1"
         onclick={(ev) => click(ev, e)}
         onpointerdown={(ev) => {
-          if (localDir === null || renaming) return;
+          if (renaming) return;
           if (!selected.has(e.path) && !ev.metaKey && !ev.ctrlKey && !ev.shiftKey) selected = new Set([e.path]);
           fileDrag.start(ev, "remote", termId, () => selectedEntries);
         }}

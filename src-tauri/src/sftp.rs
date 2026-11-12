@@ -371,11 +371,23 @@ impl Reporter {
     }
 }
 
-struct Job {
-    remote: String,
-    local: PathBuf,
-    size: u64,
-    dir: bool,
+pub(crate) struct Job {
+    pub remote: String,
+    pub local: PathBuf,
+    pub size: u64,
+    pub dir: bool,
+}
+
+/// Uzak öğeyi ve (klasörse) altındaki her şeyi listeler; `local` yolları `rel` altındadır.
+pub(crate) async fn tree(sftp: &SftpSession, remote: String, rel: PathBuf) -> Result<Vec<Job>> {
+    let meta = sftp.metadata(remote.clone()).await?;
+    let mut jobs = Vec::new();
+    if meta.file_type().is_dir() {
+        collect_remote(sftp, remote, rel, &mut jobs).await?;
+    } else {
+        jobs.push(Job { remote, local: rel, size: meta.len(), dir: false });
+    }
+    Ok(jobs)
 }
 
 fn collect_remote<'a>(
