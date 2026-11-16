@@ -86,6 +86,8 @@
           jump: !isSsh && !isDesktop ? null : jumpMode === "custom" ? jumpCustom.trim() || null : jumpMode || null,
           x11: form.kind === "ssh" ? !!form.x11 : false,
           startDir: isSsh ? form.startDir?.trim() || null : null,
+          sftpSudo: isSsh ? !!form.sftpSudo : false,
+          sftpCommand: isSsh ? form.sftpCommand?.trim() || null : null,
           baud: form.kind === "serial" ? Number(form.baud) || 115200 : null,
         },
         forget ? "" : secret ? secret : null,
@@ -192,6 +194,21 @@
     <label class="full">
       <span>Başlangıç klasörü (SFTP)</span>
       <input bind:value={form.startDir} placeholder="boşsa ana dizin — örn. /var/www/proje ya da ~/proje" spellcheck="false" />
+    </label>
+    <label class="check full">
+      <input type="checkbox" bind:checked={form.sftpSudo} />
+      <span>
+        SFTP'yi sudo ile aç (root yetkisiyle)
+        <small>Root parolası gerekmez; sudo parola sorarsa Liman bir kez sorar, isterseniz hatırlar.</small>
+      </span>
+    </label>
+    <label class="full">
+      <span>SFTP sunucu komutu (isteğe bağlı)</span>
+      <input
+        bind:value={form.sftpCommand}
+        placeholder="boşsa otomatik — örn. sudo /usr/lib/openssh/sftp-server"
+        spellcheck="false"
+      />
     </label>
     {#if form.kind === "ssh"}
       <label class="check full">

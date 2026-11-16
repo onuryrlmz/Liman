@@ -73,6 +73,17 @@ pub struct Session {
     /// Bağlanınca otomatik başlatılan tüneller (içeriği arayüz belirler).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tunnels: Vec<serde_json::Value>,
+    /// SFTP'yi sudo ile (root olarak) aç.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sftp_sudo: bool,
+    /// Özel SFTP sunucu komutu, ör. "sudo /usr/lib/openssh/sftp-server".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sftp_command: Option<String>,
+}
+
+/// Oturumun kayıtlı sudo parolasının anahtarlıktaki adı.
+pub fn sudo_secret_id(session_id: &str) -> String {
+    format!("{session_id}#sudo")
 }
 
 fn default_port() -> u16 {
@@ -208,18 +219,46 @@ pub(crate) fn write_sessions(sessions: &[Session]) -> Result<()> {
 // ---------- Gruplar ----------
 //
 // Bir oturumun grubu `folder` alanında durur. groups.json yalnızca sıralamayı
-// ve henüz oturumu olmayan boş grupları tutar.
+// ve henüz oturumu olmayan boş grupları tutar. Alt gruplar yolla yazılır: "Ankara/Web".
 
 fn groups_path() -> PathBuf {
     config_dir().join("groups.json")
 }
 
-fn clean_name(name: &str) -> Result<String> {
-    let n = name.trim();
+/// "  Ankara / Web/ " → "Ankara/Web".
+pub(crate) fn clean_name(name: &str) -> Result<String> {
+    let n = name
+        .split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
     if n.is_empty() {
         bail!("Grup adı boş olamaz");
     }
-    Ok(n.to_string())
+    Ok(n)
+}
+
+/// `g`, `root` grubunun kendisi ya da alt grubu mu?
+pub(crate) fn in_group(g: &str, root: &str) -> bool {
+    g == root || (g.starts_with(root) && g[root.len()..].starts_with('/'))
+}
+
+/// Her grubun üst grupları da listede olsun (alt gruptan önce).
+fn with_parents(groups: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(groups.len());
+    for g in groups {
+        for (i, _) in g.match_indices('/') {
+            let parent = &g[..i];
+            if !out.iter().any(|x| x == parent) {
+                out.push(parent.to_string());
+            }
+        }
+        if !out.contains(&g) {
+            out.push(g);
+        }
+    }
+    out
 }
 
 pub fn load_groups() -> Result<Vec<String>> {
@@ -231,12 +270,10 @@ pub fn load_groups() -> Result<Vec<String>> {
     };
     for s in load_sessions()? {
         if let Some(f) = s.folder.filter(|f| !f.is_empty()) {
-            if !groups.contains(&f) {
-                groups.push(f);
-            }
+            groups.push(f);
         }
     }
-    Ok(groups)
+    Ok(with_parents(groups))
 }
 
 pub(crate) fn write_groups(groups: &[String]) -> Result<()> {
@@ -247,7 +284,7 @@ fn ensure_group(name: &str) -> Result<()> {
     let mut groups = load_groups()?;
     if !groups.iter().any(|g| g == name) {
         groups.push(name.to_string());
-        write_groups(&groups)?;
+        write_groups(&with_parents(groups))?;
     }
     Ok(())
 }
@@ -256,43 +293,69 @@ pub fn create_group(name: &str) -> Result<()> {
     ensure_group(&clean_name(name)?)
 }
 
+/// Grubu alt gruplarıyla birlikte yeniden adlandırır ya da başka bir grubun altına taşır.
 pub fn rename_group(old: &str, new: &str) -> Result<()> {
     let new = clean_name(new)?;
+    if new != old && in_group(&new, old) {
+        bail!("Bir grup kendi alt grubunun içine taşınamaz");
+    }
+    let re = |g: &str| -> String {
+        if in_group(g, old) {
+            format!("{new}{}", &g[old.len()..])
+        } else {
+            g.to_string()
+        }
+    };
     let mut sessions = load_sessions()?;
-    for s in sessions.iter_mut().filter(|s| s.folder.as_deref() == Some(old)) {
-        s.folder = Some(new.clone());
+    for s in sessions.iter_mut() {
+        if let Some(f) = s.folder.as_deref().filter(|f| in_group(f, old)) {
+            s.folder = Some(re(f));
+        }
     }
-    let mut groups = load_groups()?;
-    if groups.contains(&new) {
-        groups.retain(|g| g != old);
-    } else if let Some(g) = groups.iter_mut().find(|g| *g == old) {
-        *g = new;
-    }
+    let groups = load_groups()?.iter().map(|g| re(g)).collect();
     write_sessions(&sessions)?;
-    write_groups(&groups)
+    write_groups(&with_parents(groups))
 }
 
-/// Grubu siler; oturumları ya grupsuz bırakır ya da onlarla birlikte siler.
+/// Grubu siler. Oturumlar kalacaksa grubun oturumları ve alt grupları bir üst gruba çıkar;
+/// kalmayacaksa alt gruplarıyla birlikte hepsi silinir.
 pub fn delete_group(name: &str, delete_sessions: bool) -> Result<()> {
     let mut sessions = load_sessions()?;
+    let mut groups = load_groups()?;
     if delete_sessions {
-        for s in sessions.iter().filter(|s| s.folder.as_deref() == Some(name)) {
+        for s in sessions.iter().filter(|s| s.folder.as_deref().is_some_and(|f| in_group(f, name))) {
             delete_secret(&s.id);
         }
-        sessions.retain(|s| s.folder.as_deref() != Some(name));
+        sessions.retain(|s| !s.folder.as_deref().is_some_and(|f| in_group(f, name)));
+        groups.retain(|g| !in_group(g, name));
     } else {
-        for s in sessions.iter_mut().filter(|s| s.folder.as_deref() == Some(name)) {
-            s.folder = None;
+        let parent = name.rsplit_once('/').map(|(p, _)| p);
+        let up = |g: &str| -> Option<String> {
+            if g == name {
+                return parent.map(String::from);
+            }
+            let rest = &g[name.len() + 1..];
+            Some(match parent {
+                Some(p) => format!("{p}/{rest}"),
+                None => rest.to_string(),
+            })
+        };
+        for s in sessions.iter_mut() {
+            if let Some(f) = s.folder.clone().filter(|f| in_group(f, name)) {
+                s.folder = up(&f);
+            }
         }
+        groups = groups
+            .iter()
+            .filter_map(|g| if in_group(g, name) { up(g) } else { Some(g.clone()) })
+            .collect();
     }
-    let mut groups = load_groups()?;
-    groups.retain(|g| g != name);
     write_sessions(&sessions)?;
-    write_groups(&groups)
+    write_groups(&with_parents(groups))
 }
 
 pub fn move_session(id: &str, folder: Option<String>) -> Result<()> {
-    let folder = folder.map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+    let folder = folder.as_deref().and_then(|f| clean_name(f).ok());
     let mut sessions = load_sessions()?;
     let s = sessions
         .iter_mut()
@@ -308,6 +371,7 @@ pub fn move_session(id: &str, folder: Option<String>) -> Result<()> {
 
 /// Oturumu ekler ya da günceller. `secret`: None = dokunma, Some("") = sil, Some(x) = kaydet.
 pub fn save_session(mut session: Session, secret: Option<String>) -> Result<Session> {
+    session.folder = session.folder.as_deref().and_then(|f| clean_name(f).ok());
     let mut sessions = load_sessions()?;
     if session.id.is_empty() {
         session.id = uuid::Uuid::new_v4().to_string();
@@ -376,6 +440,7 @@ pub fn get_secret(id: &str) -> Option<String> {
 fn delete_secret(id: &str) {
     if let Some(m) = TEST_SECRETS.lock().unwrap().as_mut() {
         m.remove(id);
+        m.remove(&sudo_secret_id(id));
     }
 }
 
@@ -402,6 +467,9 @@ pub fn get_secret(id: &str) -> Option<String> {
 
 #[cfg(not(test))]
 fn delete_secret(id: &str) {
+    if !id.ends_with("#sudo") {
+        delete_secret(&sudo_secret_id(id));
+    }
     for service in [SERVICE, LEGACY] {
         if let Ok(e) = keyring::Entry::new(service, id) {
             let _ = e.delete_credential();

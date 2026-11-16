@@ -5,6 +5,7 @@
   import BackupDialog from "./BackupDialog.svelte";
   import { api, errText, kindInfo, type Session } from "./api";
   import { store } from "./tabs.svelte";
+  import { buildTree, inGroup, parentOf, type GroupNode } from "./groups";
 
   let { onEdit }: { onEdit: (s: Session | null, folder?: string | null) => void } = $props();
 
@@ -12,8 +13,8 @@
   let collapsed = $state<Record<string, boolean>>(loadCollapsed());
   let menu = $state<{ x: number; y: number; items: (MenuItem | null)[] } | null>(null);
   let backup = $state<{ mode: "export" | "import"; group?: string | null } | null>(null);
-  /** Satır içi ad düzenleme: yeni grup ("") ya da var olan grubun adı. */
-  let naming = $state<{ group: string | null; value: string } | null>(null);
+  /** Satır içi ad düzenleme: yeni grup (`group: null`, `parent` altında) ya da var olan grubun son adı. */
+  let naming = $state<{ group: string | null; parent?: string | null; value: string } | null>(null);
 
   function loadCollapsed(): Record<string, boolean> {
     try {
@@ -34,11 +35,14 @@
   const matches = (s: Session) => !q || `${s.name} ${s.host} ${s.username} ${s.folder ?? ""}`.toLowerCase().includes(q);
   const byName = (a: Session, b: Session) => a.name.localeCompare(b.name, "tr");
 
-  const groups = $derived(
-    store.groups
-      .map((g) => ({ name: g, items: store.sessions.filter((s) => s.folder === g && matches(s)).sort(byName) }))
-      .filter((g) => !q || g.items.length || g.name.toLowerCase().includes(q)),
-  );
+  const tree = $derived(buildTree(store.groups));
+  const inSub = (s: Session, g: string) => !!s.folder && inGroup(s.folder, g);
+  const directItems = (g: string) => store.sessions.filter((s) => s.folder === g && matches(s)).sort(byName);
+  const subtree = (g: string) => store.sessions.filter((s) => inSub(s, g));
+  /** Aramada: grubun adı ya da alt ağacındaki bir oturum eşleşiyorsa göster. */
+  const shown = (n: GroupNode): boolean =>
+    !q || n.path.toLowerCase().includes(q) || subtree(n.path).some(matches) || n.children.some(shown);
+  const indent = (depth: number) => `${6 + depth * 14}px`;
   const ungrouped = $derived(
     store.sessions.filter((s) => (!s.folder || !store.groups.includes(s.folder)) && matches(s)).sort(byName),
   );
@@ -68,6 +72,21 @@
   function move(s: Session, folder: string | null) {
     if ((s.folder ?? null) === folder) return;
     run(() => api.sessionMove(s.id, folder));
+  }
+
+  /** Grubu başka bir grubun altına (ya da en üste) taşır. */
+  function moveGroupMenu(x: number, y: number, g: string) {
+    const name = g.slice((parentOf(g)?.length ?? -1) + 1);
+    const to = (parent: string | null) => {
+      const full = parent ? `${parent}/${name}` : name;
+      if (full !== g) run(() => api.groupRename(g, full));
+    };
+    const items: (MenuItem | null)[] = store.groups
+      .filter((x) => !inGroup(x, g))
+      .map((x) => ({ label: x, icon: "folder", disabled: parentOf(g) === x, action: () => to(x) }));
+    if (items.length) items.push(null);
+    items.push({ label: "En üst düzey", icon: "up", disabled: !parentOf(g), action: () => to(null) });
+    menu = { x, y, items };
   }
 
   function moveMenu(x: number, y: number, s: Session) {
@@ -108,24 +127,33 @@
 
   function startNewGroup() {
     filter = "";
-    naming = { group: null, value: "" };
+    naming = { group: null, parent: null, value: "" };
+  }
+
+  function startSubGroup(parent: string) {
+    filter = "";
+    if (collapsed[parent]) toggle(parent);
+    naming = { group: null, parent, value: "" };
   }
 
   async function commitName() {
     if (!naming) return;
     const { group, value } = naming;
+    const parent = group === null ? (naming.parent ?? null) : parentOf(group);
     naming = null;
     const name = value.trim();
-    if (!name || name === group) return;
-    if (group === null) run(() => api.groupCreate(name));
+    if (!name) return;
+    const full = parent ? `${parent}/${name}` : name;
+    if (full === group) return;
+    if (group === null) run(() => api.groupCreate(full));
     else {
-      if (collapsed[group]) collapsed[name] = true;
-      run(() => api.groupRename(group, name));
+      if (collapsed[group]) collapsed[full] = true;
+      run(() => api.groupRename(group, full));
     }
   }
 
   async function deleteGroup(g: string, withSessions: boolean) {
-    const n = store.sessions.filter((s) => s.folder === g).length;
+    const n = subtree(g).length;
     if (withSessions && n) {
       const ok = await ask(`"${g}" grubu ve içindeki ${n} oturum kalıcı olarak silinsin mi?`, {
         kind: "warning",
@@ -136,24 +164,35 @@
     run(() => api.groupDelete(g, withSessions));
   }
 
+  function startRename(g: string) {
+    naming = { group: g, value: g.slice((parentOf(g)?.length ?? -1) + 1) };
+  }
+
   function groupMenu(ev: MouseEvent, g: string) {
     ev.preventDefault();
-    const total = store.sessions.filter((s) => s.folder === g).length;
+    const total = subtree(g).length;
+    const { clientX: x, clientY: y } = ev;
     menu = {
-      x: ev.clientX,
-      y: ev.clientY,
+      x,
+      y,
       items: [
         {
           label: `Tümüne bağlan (${total})`,
           icon: "bolt",
           disabled: !total,
-          action: () => store.sessions.filter((s) => s.folder === g).forEach((s) => store.openSession(s)),
+          action: () => subtree(g).forEach((s) => store.openSession(s)),
         },
         { label: "Bu gruba oturum ekle", icon: "plus", action: () => onEdit(null, g) },
-        { label: "Yeniden adlandır", icon: "edit", action: () => (naming = { group: g, value: g }) },
+        { label: "Alt grup ekle", icon: "folderPlus", action: () => startSubGroup(g) },
+        { label: "Yeniden adlandır", icon: "edit", action: () => startRename(g) },
+        { label: "Taşı…", icon: "folder", action: () => setTimeout(() => moveGroupMenu(x, y, g)) },
         { label: "Dışarı aktar…", icon: "upload", disabled: !total, action: () => (backup = { mode: "export", group: g }) },
         null,
-        { label: "Grubu kaldır (oturumlar kalır)", icon: "x", action: () => deleteGroup(g, false) },
+        {
+          label: parentOf(g) ? "Grubu kaldır (içindekiler üst gruba çıkar)" : "Grubu kaldır (oturumlar kalır)",
+          icon: "x",
+          action: () => deleteGroup(g, false),
+        },
         { label: "Grubu oturumlarıyla sil", icon: "trash", danger: true, disabled: !total, action: () => deleteGroup(g, true) },
       ],
     };
@@ -197,10 +236,10 @@
   }
 </script>
 
-{#snippet sessionRow(s: Session, nested: boolean)}
+{#snippet sessionRow(s: Session, depth: number)}
   <button
     class="item"
-    class:nested
+    style:padding-left={depth ? `${10 + depth * 14}px` : undefined}
     class:dragging={drag?.s.id === s.id}
     ondblclick={() => open(s)}
     onkeydown={(e) => e.key === "Enter" && store.openSession(s)}
@@ -219,6 +258,54 @@
     {#if openCount(s)}<span class="dot" title="Açık oturum"></span>{/if}
     {#if s.hasSecret}<span class="key" title="Parola kayıtlı"><Icon name="key" size={12} /></span>{/if}
   </button>
+{/snippet}
+
+{#snippet groupNode(node: GroupNode, depth: number)}
+  {#if shown(node)}
+    {@const open = !collapsed[node.path] || !!q}
+    {@const items = directItems(node.path)}
+    <div class="group" class:drop={drag?.target === node.path} data-drop={node.path}>
+      {#if naming?.group === node.path}
+        <div class="folder editing" style:padding-left={indent(depth)}>
+          <Icon name="folder" size={14} />
+          {@render nameInput("Grup adı")}
+        </div>
+      {:else}
+        <button
+          class="folder"
+          style:padding-left={indent(depth)}
+          onclick={() => toggle(node.path)}
+          ondblclick={() => startRename(node.path)}
+          oncontextmenu={(e) => groupMenu(e, node.path)}
+          title={node.path}
+        >
+          <span class="chev" class:open><Icon name="chevron" size={12} /></span>
+          <Icon name="folder" size={14} />
+          <span class="gname">{node.name}</span>
+          <span class="count">{subtree(node.path).length}</span>
+        </button>
+      {/if}
+      {#if open}
+        {#if naming && naming.group === null && naming.parent === node.path}
+          <div class="folder editing" style:padding-left={indent(depth + 1)}>
+            <Icon name="folder" size={14} />
+            {@render nameInput("Alt grup adı")}
+          </div>
+        {/if}
+        {#each node.children as child (child.path)}
+          {@render groupNode(child, depth + 1)}
+        {/each}
+        {#each items as s (s.id)}
+          {@render sessionRow(s, depth + 1)}
+        {/each}
+        {#if !items.length && !node.children.length && !q}
+          <div class="empty-group" style:padding-left={indent(depth + 1)}>
+            {drag ? "Buraya bırakın" : "Boş grup — oturumları sürükleyip bırakın"}
+          </div>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 {/snippet}
 
 {#snippet nameInput(placeholder: string)}
@@ -255,55 +342,29 @@
   </div>
 
   <div class="list">
-    {#if naming?.group === null}
+    {#if naming && naming.group === null && !naming.parent}
       <div class="folder editing">
         <Icon name="folder" size={14} />
         {@render nameInput("Grup adı")}
       </div>
     {/if}
 
-    {#each groups as g (g.name)}
-      <div class="group" class:drop={drag?.target === g.name} data-drop={g.name}>
-        {#if naming?.group === g.name}
-          <div class="folder editing">
-            <Icon name="folder" size={14} />
-            {@render nameInput("Grup adı")}
-          </div>
-        {:else}
-          <button
-            class="folder"
-            onclick={() => toggle(g.name)}
-            ondblclick={() => (naming = { group: g.name, value: g.name })}
-            oncontextmenu={(e) => groupMenu(e, g.name)}
-          >
-            <span class="chev" class:open={!collapsed[g.name] || !!q}><Icon name="chevron" size={12} /></span>
-            <Icon name="folder" size={14} />
-            <span class="gname">{g.name}</span>
-            <span class="count">{g.items.length}</span>
-          </button>
-        {/if}
-        {#if !collapsed[g.name] || q}
-          {#each g.items as s (s.id)}
-            {@render sessionRow(s, true)}
-          {:else}
-            <div class="empty-group">{drag ? "Buraya bırakın" : "Boş grup — oturumları sürükleyip bırakın"}</div>
-          {/each}
-        {/if}
-      </div>
+    {#each tree as node (node.path)}
+      {@render groupNode(node, 0)}
     {/each}
 
     {#if ungrouped.length || (drag && drag.s.folder)}
       <div class="group loose" class:drop={drag?.target === ""} data-drop="">
-        {#if groups.length}<div class="folder plain">Grupsuz</div>{/if}
+        {#if tree.length}<div class="folder plain">Grupsuz</div>{/if}
         {#each ungrouped as s (s.id)}
-          {@render sessionRow(s, false)}
+          {@render sessionRow(s, 0)}
         {:else}
           <div class="empty-group">Gruptan çıkarmak için buraya bırakın</div>
         {/each}
       </div>
     {/if}
 
-    {#if !groups.length && !ungrouped.length && naming?.group !== null}
+    {#if !tree.length && !ungrouped.length && !naming}
       <div class="empty">
         {#if filter}
           Eşleşen oturum yok.
@@ -436,9 +497,6 @@
   button.item {
     padding: 5px 8px;
     touch-action: none;
-  }
-  button.item.nested {
-    padding-left: 24px;
   }
   button.item.dragging {
     opacity: 0.4;

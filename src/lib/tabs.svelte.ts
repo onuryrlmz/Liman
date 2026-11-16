@@ -248,6 +248,8 @@ class Store {
         sftpOnly,
         jump: s.jump,
         x11: s.x11,
+        sftpSudo: s.sftpSudo,
+        sftpCommand: s.sftpCommand,
       },
       s.name || s.host,
       s,

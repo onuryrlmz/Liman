@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import Terminal from "$lib/Terminal.svelte";
   import SessionList from "$lib/SessionList.svelte";
@@ -8,6 +8,7 @@
   import TunnelDialog from "$lib/TunnelDialog.svelte";
   import AboutDialog from "$lib/AboutDialog.svelte";
   import HostKeyDialog from "$lib/HostKeyDialog.svelte";
+  import SudoDialog from "$lib/SudoDialog.svelte";
   import SettingsDialog from "$lib/SettingsDialog.svelte";
   import SnippetList from "$lib/SnippetList.svelte";
   import LocalPanel from "$lib/LocalPanel.svelte";
@@ -109,6 +110,47 @@
         : [{ label: "Varsayılan kabuk", icon: "terminal", action: () => store.openLocal() }],
     };
   }
+
+  // Sekme çubuğu: sığmayınca sekmeler küçülür, sonra yatay kayar; etkin sekme hep görünür.
+  let tabsEl = $state<HTMLDivElement>();
+  let tabsOverflow = $state(false);
+
+  function measureTabs() {
+    if (tabsEl) tabsOverflow = tabsEl.scrollWidth > tabsEl.clientWidth + 1;
+  }
+
+  function tabWheel(ev: WheelEvent) {
+    if (!tabsEl || Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) return;
+    ev.preventDefault();
+    tabsEl.scrollLeft += ev.deltaY;
+  }
+
+  function tabList(ev: MouseEvent) {
+    const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+    menu = {
+      x: r.left,
+      y: r.bottom,
+      items: store.views.flatMap((v) => {
+        const p = store.pane(v.focus);
+        if (!p) return [];
+        const icon = v.key === store.activeKey ? "check" : p.kind === "local" ? "terminal" : kindInfo[p.kind].icon;
+        return [{ label: p.title, icon, action: () => (store.activeKey = v.key) }];
+      }),
+    };
+  }
+
+  $effect(() => {
+    const key = store.activeKey;
+    void store.views.length;
+    if (!tabsEl) return;
+    const ro = new ResizeObserver(measureTabs);
+    ro.observe(tabsEl);
+    tick().then(() => {
+      measureTabs();
+      tabsEl?.querySelector(`[data-view="${key}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+    return () => ro.disconnect();
+  });
 
   function tabMenu(ev: MouseEvent, view: View) {
     ev.preventDefault();
@@ -432,6 +474,8 @@
 
     <section class="work">
       <nav class="tabbar">
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="tabs" bind:this={tabsEl} onwheel={tabWheel} onscroll={measureTabs}>
         {#each store.views as view (view.key)}
           {@const tab = store.pane(view.focus)}
           {@const count = leaves(view.root).length}
@@ -439,6 +483,7 @@
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
             <div
               class="tab"
+              data-view={view.key}
               class:on={view.key === store.activeKey}
               onclick={() => (store.activeKey = view.key)}
               onauxclick={(e) => e.button === 1 && store.close(view.key)}
@@ -460,6 +505,10 @@
             </div>
           {/if}
         {/each}
+        </div>
+        {#if tabsOverflow}
+          <button class="newtab" title="Tüm sekmeler" onclick={tabList}><Icon name="chevronDown" size={14} /></button>
+        {/if}
         <button class="newtab" title="Yeni yerel terminal" onclick={() => store.openLocal()}><Icon name="plus" size={14} /></button>
       </nav>
 
@@ -656,6 +705,7 @@
   <TunnelDialog tab={tunnelTab} onClose={() => (tunnelTab = null)} />
 {/if}
 <HostKeyDialog />
+<SudoDialog />
 {#if fileDrag.drag}
   <div class="file-ghost" style:left="{fileDrag.drag.x + 14}px" style:top="{fileDrag.drag.y + 10}px">
     <Icon name={fileDrag.drag.from === "local" ? "upload" : "download"} size={13} />
@@ -972,18 +1022,39 @@
   .tabbar {
     display: flex;
     align-items: stretch;
-    gap: 1px;
     height: 34px;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
+  }
+  .tabs {
+    display: flex;
+    align-items: stretch;
+    gap: 1px;
+    flex: 0 1 auto;
+    min-width: 0;
     overflow-x: auto;
-    scrollbar-width: none;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  .tabs:hover {
+    scrollbar-color: var(--border) transparent;
+  }
+  .tabs::-webkit-scrollbar {
+    height: 3px;
+  }
+  .tabs::-webkit-scrollbar-thumb {
+    background: transparent;
+  }
+  .tabs:hover::-webkit-scrollbar-thumb {
+    background: var(--border);
   }
   .tab {
     display: flex;
     align-items: center;
     gap: 7px;
-    max-width: 220px;
+    flex: 0 1 220px;
+    min-width: 110px;
     padding: 0 6px 0 12px;
     color: var(--muted);
     font-size: 12.5px;
@@ -1040,6 +1111,7 @@
   .newtab {
     display: grid;
     place-items: center;
+    flex: none;
     width: 34px;
     border: 0;
     background: none;

@@ -40,6 +40,8 @@ fn new_session(name: &str, host: &str) -> Session {
         x11: false,
         baud: None,
         tunnels: vec![],
+        sftp_sudo: false,
+        sftp_command: None,
     }
 }
 
@@ -174,7 +176,8 @@ pub fn parse_mobaxterm(text: &str) -> Preview {
         };
         match name {
             "SubRep" => {
-                let f = value.trim().replace('\\', " / ");
+                // Alt klasörler Liman'da da alt grup olur.
+                let f = value.trim().replace('\\', "/");
                 folder = (!f.is_empty()).then_some(f);
                 continue;
             }

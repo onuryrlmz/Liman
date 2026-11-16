@@ -101,6 +101,10 @@
         <input type="checkbox" checked={s.autoReconnect} onchange={(e) => settings.update({ autoReconnect: e.currentTarget.checked })} />
         <span>Kopan SSH bağlantılarına otomatik yeniden bağlan <small>Ağ değişince ya da bilgisayar uykudan uyanınca</small></span>
       </label>
+      <label class="check">
+        <input type="checkbox" checked={s.closeOnExit} onchange={(e) => settings.update({ closeOnExit: e.currentTarget.checked })} />
+        <span><code>exit</code> ile çıkılınca sekmeyi kapat <small>Kapalıysa sekme açık kalır, R ile yeniden başlatılır</small></span>
+      </label>
     </section>
 
     <section>

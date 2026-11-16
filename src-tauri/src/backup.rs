@@ -127,13 +127,17 @@ pub fn export(path: &Path, password: Option<&str>, group: Option<&str>) -> Resul
     }
     let sessions: Vec<Session> = store::load_sessions()?
         .into_iter()
-        .filter(|s| group.is_none() || s.folder.as_deref() == group)
+        .filter(|s| match (group, s.folder.as_deref()) {
+            (None, _) => true,
+            (Some(g), Some(f)) => store::in_group(f, g),
+            (Some(_), None) => false,
+        })
         .collect();
     if sessions.is_empty() {
         bail!("Dışarı aktarılacak oturum yok");
     }
     let groups = match group {
-        Some(g) => vec![g.to_string()],
+        Some(g) => store::load_groups()?.into_iter().filter(|x| store::in_group(x, g)).collect(),
         None => store::load_groups()?,
     };
 

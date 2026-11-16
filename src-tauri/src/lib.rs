@@ -35,6 +35,10 @@ struct AppState {
     streams: stream::Streams,
     /// Cevap bekleyen sunucu anahtarı soruları.
     host_key_questions: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
+    /// Cevap bekleyen sudo parolası soruları.
+    sudo_questions: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Option<ssh::SudoAnswer>>>>>,
+    /// Bu çalışma boyunca kabul edilen sudo parolaları (oturum kimliğine göre).
+    sudo_cache: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
@@ -131,6 +135,10 @@ struct ConnectRequest {
     /// Kabuk ve SFTP olmadan, yalnızca tünel için (VNC/RDP).
     #[serde(default)]
     tunnel_only: bool,
+    #[serde(default)]
+    sftp_sudo: bool,
+    #[serde(default)]
+    sftp_command: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -149,6 +157,54 @@ fn host_key_asker(app: AppHandle, pending: Arc<Mutex<HashMap<String, tokio::sync
         let _ = app.emit("host-key", HostKeyEvent { id, question });
         rx
     })
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SudoEvent {
+    id: String,
+    user: String,
+    host: String,
+    retry: bool,
+}
+
+/// sudo parola sorarsa: önce kayıtlı ya da bu çalışmada girilmiş sudo parolası, sonra giriş
+/// parolası denenir; olmazsa arayüzden sorulur.
+fn sudo_auth(app: &AppHandle, state: &AppState, req: &ConnectRequest, login: Option<&String>) -> ssh::SudoAuth {
+    let sid = req.session_id.clone();
+    let mut known: Vec<String> = Vec::new();
+    if let Some(sid) = &sid {
+        known.extend(state.sudo_cache.lock().unwrap().get(sid).cloned());
+        known.extend(store::get_secret(&store::sudo_secret_id(sid)));
+    }
+    known.extend(login.cloned());
+    known.dedup();
+    let pending = state.sudo_questions.clone();
+    let (user, host) = (req.username.trim().to_string(), req.host.trim().to_string());
+    let app = app.clone();
+    let ask: ssh::AskSudo = Arc::new(move |retry| {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = uuid::Uuid::new_v4().to_string();
+        pending.lock().unwrap().insert(id.clone(), tx);
+        let _ = app.emit("sudo-password", SudoEvent { id, user: user.clone(), host: host.clone(), retry });
+        rx
+    });
+    let cache = state.sudo_cache.clone();
+    let accepted = Arc::new(move |pw: &str, remember: bool| {
+        let Some(sid) = &sid else { return };
+        cache.lock().unwrap().insert(sid.clone(), pw.to_string());
+        if remember {
+            let _ = store::set_secret(&store::sudo_secret_id(sid), pw);
+        }
+    });
+    ssh::SudoAuth { known, ask, accepted }
+}
+
+#[tauri::command]
+fn sudo_answer(state: State<'_, AppState>, id: String, password: Option<String>, remember: bool) {
+    if let Some(tx) = state.sudo_questions.lock().unwrap().remove(&id) {
+        let _ = tx.send(password.map(|password| ssh::SudoAnswer { password, remember }));
+    }
 }
 
 #[tauri::command]
@@ -185,6 +241,8 @@ fn resolve_jump(spec: &str, depth: usize) -> Result<ssh::ConnectParams, String> 
             },
             x11: false,
             tunnel_only: true,
+            sftp_server: Default::default(),
+            sudo: None,
         });
     }
     let (user, rest) = match spec.rsplit_once('@') {
@@ -209,6 +267,8 @@ fn resolve_jump(spec: &str, depth: usize) -> Result<ssh::ConnectParams, String> 
         jump: None,
         x11: false,
         tunnel_only: true,
+        sftp_server: Default::default(),
+        sudo: None,
     })
 }
 
@@ -234,7 +294,16 @@ async fn ssh_connect(
             .as_deref()
             .and_then(store::get_secret)
     });
+    let sftp_server = ssh::SftpServer {
+        command: req.sftp_command.clone(),
+        sudo: req.sftp_sudo,
+    };
+    // Anahtarla girişte `secret` anahtarın parolasıdır, sudo'ya verilmez.
+    let login = secret.as_ref().filter(|_| req.auth != store::AuthKind::Key);
+    let sudo = (sftp_server.launch() != ssh::SftpLaunch::Subsystem).then(|| sudo_auth(&app, &state, &req, login));
     let params = ssh::ConnectParams {
+        sftp_server,
+        sudo,
         host: req.host.trim().to_string(),
         port: req.port,
         username: req.username.trim().to_string(),
@@ -899,6 +968,7 @@ pub fn run() {
             local_spawn,
             ssh_connect,
             host_key_answer,
+            sudo_answer,
             ssh_share,
             telnet_connect,
             serial_ports,

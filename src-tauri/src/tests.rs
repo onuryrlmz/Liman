@@ -94,6 +94,8 @@ fn test_params(secret: Option<&str>) -> Option<ssh::ConnectParams> {
         jump: None,
         x11: false,
         tunnel_only: false,
+        sftp_server: Default::default(),
+        sudo: None,
     })
 }
 
@@ -313,6 +315,8 @@ fn session(name: &str, folder: Option<&str>, auth: store::AuthKind) -> store::Se
         x11: false,
         baud: None,
         tunnels: vec![],
+        sftp_sudo: false,
+        sftp_command: None,
     }
 }
 
@@ -340,6 +344,39 @@ fn groups_create_rename_move_delete() {
     store::delete_group("Sil", true).unwrap();
     assert_eq!(store::load_sessions().unwrap().len(), 1);
     assert!(store::create_group("   ").is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn nested_groups() {
+    let dir = fresh_config("nested-groups");
+    let find = |id: &str| store::load_sessions().unwrap().into_iter().find(|s| s.id == id).unwrap();
+    // Alt grup oluşturmak üst grubu da oluşturur; boşluklar ve fazla "/" temizlenir.
+    store::create_group(" Ankara / Web/ ").unwrap();
+    assert_eq!(store::load_groups().unwrap(), vec!["Ankara", "Ankara/Web"]);
+    let a = store::save_session(session("a", Some("Ankara/Web/Prod"), store::AuthKind::Auto), None).unwrap();
+    let b = store::save_session(session("b", Some("Ankara"), store::AuthKind::Auto), None).unwrap();
+    let c = store::save_session(session("c", Some("Ankara Yedek"), store::AuthKind::Auto), None).unwrap();
+    assert_eq!(store::load_groups().unwrap(), vec!["Ankara", "Ankara/Web", "Ankara/Web/Prod", "Ankara Yedek"]);
+
+    // Yeniden adlandırma alt grupları da taşır, adı benzer olan gruba dokunmaz.
+    store::rename_group("Ankara", "Merkez/Ankara").unwrap();
+    assert_eq!(find(&a.id).folder.as_deref(), Some("Merkez/Ankara/Web/Prod"));
+    assert_eq!(find(&b.id).folder.as_deref(), Some("Merkez/Ankara"));
+    assert_eq!(find(&c.id).folder.as_deref(), Some("Ankara Yedek"));
+    assert!(store::rename_group("Merkez", "Merkez/Ankara/X").is_err());
+
+    // Grubu kaldırınca içindekiler bir üst gruba çıkar.
+    store::delete_group("Merkez/Ankara", false).unwrap();
+    assert_eq!(find(&a.id).folder.as_deref(), Some("Merkez/Web/Prod"));
+    assert_eq!(find(&b.id).folder.as_deref(), Some("Merkez"));
+    assert_eq!(store::load_groups().unwrap(), vec!["Merkez", "Merkez/Web", "Merkez/Web/Prod", "Ankara Yedek"]);
+
+    // Oturumlarıyla silmek alt gruplardakileri de siler.
+    store::delete_group("Merkez", true).unwrap();
+    let left: Vec<_> = store::load_sessions().unwrap().into_iter().map(|s| s.name).collect();
+    assert_eq!(left, vec!["c"]);
+    assert_eq!(store::load_groups().unwrap(), vec!["Ankara Yedek"]);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -658,7 +695,7 @@ fn parses_mobaxterm_sessions() {
     let f = &p.sessions[1];
     assert_eq!((f.host.as_str(), f.port, f.username.as_str()), ("files.example.com", 2222, "deploy"));
     assert_eq!(f.kind, store::SessionKind::Sftp);
-    assert_eq!(f.folder.as_deref(), Some("Müşteri / Prod"));
+    assert_eq!(f.folder.as_deref(), Some("Müşteri/Prod"));
 }
 
 #[test]
@@ -1219,4 +1256,130 @@ fn clip_file_uri_roundtrip() {
 fn local_name_is_nfc_on_macos() {
     let p = std::path::Path::new("/tmp/klaso\u{308}r/rapor g\u{306}u\u{308}s\u{327}.txt");
     assert_eq!(crate::ssh::local_name(p), "rapor ğüş.txt");
+}
+
+#[test]
+fn sftp_launch_modes() {
+    use ssh::{SftpLaunch, SftpServer};
+    let l = |command: Option<&str>, sudo| SftpServer { command: command.map(String::from), sudo }.launch();
+    assert_eq!(l(None, false), SftpLaunch::Subsystem);
+    assert_eq!(l(Some("  "), false), SftpLaunch::Subsystem);
+    assert_eq!(l(None, true), SftpLaunch::Sudo(String::new()));
+    // WinSCP'deki gibi yazılan komut: sudo'yu Liman yürütür.
+    assert_eq!(
+        l(Some("sudo /usr/lib/openssh/sftp-server"), false),
+        SftpLaunch::Sudo("/usr/lib/openssh/sftp-server".into())
+    );
+    assert_eq!(l(Some("/opt/sftp-server -l INFO"), false), SftpLaunch::Exec("/opt/sftp-server -l INFO".into()));
+    assert_eq!(l(Some("/opt/sftp-server"), true), SftpLaunch::Sudo("/opt/sftp-server".into()));
+}
+
+/// Gerçek sudo yerine: parola "dogru"; klasörde `nopasswd` varsa sormaz.
+fn fake_sudo(name: &str, nopasswd: bool) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("liman-fake-sudo-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("sudo");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/bash
+[ "$1" = -S ] && shift
+[ "$1" = -p ] && { P=$2; shift 2; }
+if [ ! -f "$(dirname "$0")/nopasswd" ]; then
+  for i in 1 2 3; do
+    printf '%s' "$P" >&2
+    IFS= read -r pw || exit 1
+    [ "$pw" = dogru ] && break
+    echo "Sorry, try again." >&2
+    [ $i = 3 ] && { echo "sudo: 3 incorrect password attempts" >&2; exit 1; }
+  done
+fi
+exec "$@"
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if nopasswd {
+        std::fs::write(dir.join("nopasswd"), "").unwrap();
+    }
+    bin
+}
+
+type SudoLog = Arc<Mutex<Vec<String>>>;
+
+/// Sorulduğunda `answers` sırayla verilir; sorular ve kabul edilen parola `log`a yazılır.
+fn sudo_auth(known: &[&str], answers: Vec<Option<(&'static str, bool)>>) -> (ssh::SudoAuth, SudoLog) {
+    let log: SudoLog = Arc::default();
+    let answers = Arc::new(Mutex::new(answers.into_iter()));
+    let (l1, l2) = (log.clone(), log.clone());
+    let auth = ssh::SudoAuth {
+        known: known.iter().map(|s| s.to_string()).collect(),
+        ask: Arc::new(move |retry| {
+            l1.lock().unwrap().push(format!("sor retry={retry}"));
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let a = answers.lock().unwrap().next().flatten();
+            let _ = tx.send(a.map(|(p, r)| ssh::SudoAnswer { password: p.into(), remember: r }));
+            rx
+        }),
+        accepted: Arc::new(move |pw, remember| l2.lock().unwrap().push(format!("kabul {pw} {remember}"))),
+    };
+    (auth, log)
+}
+
+async fn sudo_sftp(name: &str, nopasswd: bool, command: Option<&str>, auth: ssh::SudoAuth) -> Option<anyhow::Result<()>> {
+    let mut params = test_params(None)?;
+    let bin = fake_sudo(name, nopasswd);
+    ssh::TEST_SUDO.with(|s| *s.borrow_mut() = Some(bin.to_string_lossy().into_owned()));
+    params.shell = false;
+    params.sftp_server = ssh::SftpServer { command: command.map(String::from), sudo: true };
+    params.sudo = Some(auth);
+    let (_out, sink) = Output::new();
+    let (on_exit, _exited) = exit_signal();
+    let res = async {
+        let term = ssh::connect(params, 80, 24, sink, accept_all(), on_exit).await?;
+        let s = term.conn.sftp().await?;
+        let home = s.canonicalize(".").await?;
+        sftp::list(s, &home).await?;
+        term.conn.disconnect().await;
+        Ok(())
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+    Some(res)
+}
+
+#[tokio::test]
+async fn sftp_via_sudo() {
+    // Bilinen parola doğru: sorulmaz. sftp-server yolu sunucuda aranır.
+    let (auth, log) = sudo_auth(&["dogru"], vec![]);
+    let Some(res) = sudo_sftp("bilinen", false, None, auth).await else {
+        return;
+    };
+    res.unwrap();
+    assert_eq!(*log.lock().unwrap(), vec!["kabul dogru false"]);
+
+    // Bilinen parola yanlış: kullanıcıya "tekrar" diye sorulur, hatırlanması istenir.
+    let (auth, log) = sudo_auth(&["yanlis"], vec![Some(("dogru", true))]);
+    sudo_sftp("yanlis", false, None, auth).await.unwrap().unwrap();
+    assert_eq!(*log.lock().unwrap(), vec!["sor retry=true", "kabul dogru true"]);
+
+    // Parolasız sudo, WinSCP biçiminde yazılmış komut.
+    let server = ["/usr/libexec/sftp-server", "/usr/lib/openssh/sftp-server", "/usr/lib/ssh/sftp-server"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap();
+    let (auth, log) = sudo_auth(&[], vec![]);
+    sudo_sftp("parolasiz", true, Some(&format!("sudo {server}")), auth).await.unwrap().unwrap();
+    assert!(log.lock().unwrap().is_empty());
+
+    // Kullanıcı vazgeçti.
+    let (auth, _) = sudo_auth(&[], vec![None]);
+    let e = sudo_sftp("vazgec", false, None, auth).await.unwrap().unwrap_err();
+    assert!(e.to_string().contains("girilmedi"), "{e}");
+
+    // Üç kez yanlış: sudo'nun mesajı gösterilir.
+    let (auth, log) = sudo_auth(&["a"], vec![Some(("b", false)), Some(("c", false))]);
+    let e = sudo_sftp("uc-yanlis", false, None, auth).await.unwrap().unwrap_err();
+    assert!(e.to_string().contains("3 incorrect password attempts"), "{e}");
+    assert_eq!(*log.lock().unwrap(), vec!["sor retry=true", "sor retry=true"]);
 }

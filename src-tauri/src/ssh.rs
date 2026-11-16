@@ -50,6 +50,97 @@ pub struct ConnectParams {
     pub x11: bool,
     /// Kabuksuz bağlantıda SFTP de gerekmez (VNC/RDP tüneli).
     pub tunnel_only: bool,
+    /// SFTP sunucusunun nasıl başlatılacağı (varsayılan: `sftp` alt sistemi).
+    pub sftp_server: SftpServer,
+    /// sudo parola sorarsa: önce denenecek parolalar, sonra kullanıcıya sorma.
+    pub sudo: Option<SudoAuth>,
+}
+
+/// SFTP'yi alt sistem yerine komutla başlatma; örneğin sudo ile root olarak.
+#[derive(Clone, Debug, Default)]
+pub struct SftpServer {
+    /// Özel komut, ör. "sudo /usr/lib/openssh/sftp-server" (WinSCP'deki gibi).
+    pub command: Option<String>,
+    /// sftp-server'ı sudo ile çalıştır; yolu sunucuda aranır.
+    pub sudo: bool,
+}
+
+pub struct SudoAnswer {
+    pub password: String,
+    pub remember: bool,
+}
+
+/// `retry`: önceki parola yanlıştı. Cevap `None` ise kullanıcı vazgeçti.
+pub type AskSudo = Arc<dyn Fn(bool) -> oneshot::Receiver<Option<SudoAnswer>> + Send + Sync>;
+/// sudo parolayı kabul edince: parola ve "hatırla" seçimi.
+pub type SudoAccepted = Arc<dyn Fn(&str, bool) + Send + Sync>;
+
+pub struct SudoAuth {
+    /// Sormadan önce denenecek parolalar (kayıtlı sudo parolası, giriş parolası).
+    pub known: Vec<String>,
+    pub ask: AskSudo,
+    pub accepted: SudoAccepted,
+}
+
+/// SFTP'nin nasıl başlatılacağı.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SftpLaunch {
+    Subsystem,
+    Exec(String),
+    /// sudo ile; içerik sftp-server komutu, boşsa sunucuda aranır.
+    Sudo(String),
+}
+
+impl SftpServer {
+    pub(crate) fn launch(&self) -> SftpLaunch {
+        let cmd = self.command.as_deref().map(str::trim).filter(|c| !c.is_empty());
+        match cmd {
+            // "sudo ..." yazılmışsa sudo'yu Liman yürütür ki parola sorulabilsin.
+            Some(c) => match c.strip_prefix("sudo ") {
+                Some(rest) => SftpLaunch::Sudo(rest.trim().to_string()),
+                None if self.sudo => SftpLaunch::Sudo(c.to_string()),
+                None => SftpLaunch::Exec(c.to_string()),
+            },
+            None if self.sudo => SftpLaunch::Sudo(String::new()),
+            None => SftpLaunch::Subsystem,
+        }
+    }
+}
+
+pub(crate) const SUDO_PROMPT: &str = "[liman-sudo-parola]";
+const SUDO_READY: &str = "LIMAN-SFTP-HAZIR";
+
+#[cfg(test)]
+thread_local! {
+    /// Testlerde gerçek sudo yerine sahte bir betik.
+    pub(crate) static TEST_SUDO: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn sudo_bin() -> String {
+    #[cfg(test)]
+    if let Some(s) = TEST_SUDO.with(|s| s.borrow().clone()) {
+        return s;
+    }
+    "sudo".into()
+}
+
+/// sudo, parolayı stdin'den okur (-S) ve bilinen bir istem yazar; kabul edince sftp-server
+/// başlamadan önce bir işaret basılır, böylece parola faslının bittiği anlaşılır.
+pub(crate) fn sudo_command(server: &str) -> String {
+    let run = format!(
+        "{} -S -p '{SUDO_PROMPT}' sh -c 'printf {SUDO_READY}; exec \"$0\" \"$@\"'",
+        sudo_bin()
+    );
+    if server.is_empty() {
+        let paths = "/usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server \
+                     /usr/libexec/sftp-server /usr/lib/sftp-server";
+        format!(
+            "for p in {paths}; do [ -x \"$p\" ] && exec {run} \"$p\"; done; \
+             echo 'sftp-server bulunamadı' >&2; exit 127"
+        )
+    } else {
+        format!("exec {run} {server}")
+    }
 }
 
 pub enum SshInput {
@@ -100,6 +191,8 @@ pub struct SshConn {
     tunnels: Mutex<HashMap<String, Tunnel>>,
     forwards: RemoteForwards,
     x11: Option<Arc<crate::x11::X11Ctx>>,
+    sftp_server: SftpServer,
+    sudo: Option<SudoAuth>,
 }
 
 pub struct SshTerm {
@@ -539,6 +632,8 @@ pub async fn connect(
         forwards,
         x11,
         stats_prev: Mutex::new(None),
+        sftp_server: p.sftp_server,
+        sudo: p.sudo,
     });
 
     if !p.shell {
@@ -679,13 +774,73 @@ impl SshConn {
         self.sftp
             .get_or_try_init(|| async {
                 let ch = self.handle.channel_open_session().await?;
-                ch.request_subsystem(true, "sftp").await?;
+                match self.sftp_server.launch() {
+                    SftpLaunch::Subsystem => ch.request_subsystem(true, "sftp").await?,
+                    SftpLaunch::Exec(cmd) => ch.exec(true, cmd).await?,
+                    SftpLaunch::Sudo(server) => {
+                        ch.exec(true, sudo_command(&server)).await?;
+                        return self.sudo_handshake(ch).await;
+                    }
+                }
                 let sftp = SftpSession::new(ch.into_stream())
                     .await
                     .map_err(|e| anyhow!("SFTP başlatılamadı: {e}"))?;
                 Ok::<_, anyhow::Error>(sftp)
             })
             .await
+    }
+
+    /// sudo'nun parola faslını yürütür, sftp-server başlayınca SFTP oturumunu kurar.
+    async fn sudo_handshake(&self, mut ch: russh::Channel<client::Msg>) -> Result<SftpSession> {
+        let mut known = self.sudo.as_ref().map(|s| s.known.clone()).unwrap_or_default().into_iter();
+        let (mut out, mut err) = (Vec::new(), String::new());
+        let mut tries = 0;
+        let mut used: Option<(String, bool)> = None;
+        loop {
+            match ch.wait().await {
+                Some(ChannelMsg::Data { data }) => {
+                    out.extend_from_slice(&data);
+                    if String::from_utf8_lossy(&out).contains(SUDO_READY) {
+                        break;
+                    }
+                }
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    err.push_str(&String::from_utf8_lossy(&data));
+                    let Some(i) = err.find(SUDO_PROMPT) else { continue };
+                    err.drain(..i + SUDO_PROMPT.len());
+                    let answer = match known.next() {
+                        Some(pw) => (pw, false),
+                        None => {
+                            let auth = self.sudo.as_ref().context("sudo parola istiyor")?;
+                            match (auth.ask)(tries > 0).await {
+                                Ok(Some(a)) => (a.password, a.remember),
+                                _ => bail!("sudo parolası girilmedi; SFTP açılamadı"),
+                            }
+                        }
+                    };
+                    tries += 1;
+                    ch.data_bytes(format!("{}\n", answer.0).into_bytes()).await?;
+                    used = Some(answer);
+                }
+                // Çıkış kodu stderr'in sonundan önce gelebilir; kanal kapanana kadar okunur.
+                Some(ChannelMsg::Close) | None => {
+                    let why = err
+                        .lines()
+                        .map(str::trim)
+                        .rfind(|l| !l.is_empty() && !l.starts_with("Sorry, try again"))
+                        .unwrap_or("sudo kapandı")
+                        .to_string();
+                    bail!("SFTP sudo ile başlatılamadı: {why}");
+                }
+                _ => {}
+            }
+        }
+        if let (Some(auth), Some((pw, remember))) = (&self.sudo, used) {
+            (auth.accepted)(&pw, remember);
+        }
+        SftpSession::new(ch.into_stream())
+            .await
+            .map_err(|e| anyhow!("SFTP başlatılamadı: {e}"))
     }
 
     pub async fn disconnect(&self) {

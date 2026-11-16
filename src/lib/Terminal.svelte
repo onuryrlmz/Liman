@@ -425,6 +425,8 @@
         term.write("\r\n");
         return scheduleReconnect();
       }
+      // Kabuk kendisi kapandı (exit, Ctrl+D): sekme de kapansın.
+      if (code != null && settings.value.closeOnExit) return store.closePane(tab.key);
       term.write(
         `\r\n\x1b[90m[Oturum sonlandı${code != null ? `, çıkış kodu ${code}` : ""}. Yeniden başlatmak için R]\x1b[0m\r\n`,
       );

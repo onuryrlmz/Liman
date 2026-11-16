@@ -24,6 +24,10 @@ export interface Session {
   x11?: boolean;
   /** SFTP tarayıcısının açılacağı klasör; boşsa ana dizin. */
   startDir?: string | null;
+  /** SFTP'yi sudo ile (root olarak) aç. */
+  sftpSudo?: boolean;
+  /** Özel SFTP sunucu komutu, ör. "sudo /usr/lib/openssh/sftp-server". */
+  sftpCommand?: string | null;
 }
 
 export interface ConnectRequest {
@@ -41,6 +45,16 @@ export interface ConnectRequest {
   x11?: boolean;
   /** Kabuk ve SFTP olmadan, yalnızca tünel için (VNC/RDP). */
   tunnelOnly?: boolean;
+  sftpSudo?: boolean;
+  sftpCommand?: string | null;
+}
+
+export interface SudoQuestion {
+  id: string;
+  user: string;
+  host: string;
+  /** Önceki parola yanlıştı. */
+  retry: boolean;
 }
 
 export interface Snippet {
@@ -191,6 +205,8 @@ export const api = {
     invoke<[string, string]>("rdp_prepare", { host, port, username, via }),
   sshStats: (id: string) => invoke<ServerStats>("ssh_stats", { id }),
   hostKeyAnswer: (id: string, accept: boolean) => invoke<void>("host_key_answer", { id, accept }),
+  sudoAnswer: (id: string, password: string | null, remember: boolean) =>
+    invoke<void>("sudo_answer", { id, password, remember }),
   importPreview: (source: "ssh-config" | "mobaxterm", path: string | null) =>
     invoke<ImportPreview>("import_preview", { source, path }),
   importSessions: (sessions: Session[]) => invoke<{ added: number; skipped: number }>("import_sessions", { sessions }),

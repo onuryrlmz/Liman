@@ -151,6 +151,8 @@ export interface Settings {
   copyOnSelect: boolean;
   rightClickPaste: boolean;
   autoReconnect: boolean;
+  /** Kabuktan `exit` ile çıkılınca panoyu (son panoysa sekmeyi) kapat. */
+  closeOnExit: boolean;
   checkUpdates: boolean;
   /** Terminal çıktısını düz metin dosyasına yaz (Rust tarafı okur). */
   sessionLog: boolean;
@@ -186,6 +188,7 @@ export const defaults: Settings = {
   copyOnSelect: true,
   rightClickPaste: true,
   autoReconnect: true,
+  closeOnExit: true,
   checkUpdates: true,
   sessionLog: false,
   logDir: "",
