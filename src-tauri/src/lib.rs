@@ -13,6 +13,7 @@ mod store;
 mod stream;
 mod x11;
 mod sync;
+mod vault;
 
 use std::{collections::HashMap, fmt::Display, path::PathBuf, sync::Arc, sync::Mutex};
 
@@ -198,6 +199,46 @@ fn sudo_auth(app: &AppHandle, state: &AppState, req: &ConnectRequest, login: Opt
         }
     });
     ssh::SudoAuth { known, ask, accepted }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultStatus {
+    enabled: bool,
+    unlocked: bool,
+}
+
+#[tauri::command]
+fn vault_status() -> VaultStatus {
+    VaultStatus {
+        enabled: vault::enabled(),
+        unlocked: vault::unlocked(),
+    }
+}
+
+/// Argon2 yavaştır (bilerek); arayüzü dondurmasın diye ayrı iş parçacığında.
+async fn blocking(f: impl FnOnce() -> anyhow::Result<()> + Send + 'static) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(err)?.map_err(err)
+}
+
+#[tauri::command]
+async fn vault_unlock(password: String) -> CmdResult<()> {
+    blocking(move || vault::unlock(&password)).await
+}
+
+#[tauri::command]
+async fn vault_enable(password: String) -> CmdResult<()> {
+    blocking(move || store::enable_master(&password)).await
+}
+
+#[tauri::command]
+async fn vault_disable(password: String) -> CmdResult<()> {
+    blocking(move || store::disable_master(&password)).await
+}
+
+#[tauri::command]
+async fn vault_change(old: String, new: String) -> CmdResult<()> {
+    blocking(move || vault::change(&old, &new)).await
 }
 
 #[tauri::command]
@@ -599,8 +640,11 @@ async fn sessions_export(
     path: String,
     password: Option<String>,
     group: Option<String>,
+    master: Option<String>,
 ) -> CmdResult<backup::ExportResult> {
     tauri::async_runtime::spawn_blocking(move || {
+        // Ana parola tanımlıysa dışarı aktarmadan önce yeniden sorulur.
+        vault::check(master.as_deref().unwrap_or_default())?;
         backup::export(PathBuf::from(path).as_path(), password.as_deref(), group.as_deref())
     })
     .await
@@ -969,6 +1013,11 @@ pub fn run() {
             ssh_connect,
             host_key_answer,
             sudo_answer,
+            vault_status,
+            vault_unlock,
+            vault_enable,
+            vault_disable,
+            vault_change,
             ssh_share,
             telnet_connect,
             serial_ports,

@@ -1,6 +1,6 @@
 [package]
 name = "liman"
-version = "0.7.5"
+version = "0.7.6"
 description = "SSH, SFTP ve yerel terminal istemcisi"
 authors = ["onuryrlmz"]
 edition = "2021"
@@ -61,3 +61,10 @@ block2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSError", "NSGeometry", "NSObject", "NSOperation", "NSString", "NSURL", "block2"] }
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSEvent", "NSFilePromiseProvider", "NSImage", "NSPasteboard", "NSResponder", "NSView", "NSWorkspace", "block2"] }
 unicode-normalization = "0.1.26"
+
+# Ana parola ve şifreli yedekler Argon2 kullanır; geliştirme derlemesinde de hızlı olsun.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

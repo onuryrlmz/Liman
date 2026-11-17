@@ -1,4 +1,4 @@
-import { api, errText, type ConnectRequest, type Session, type Snippet, type Transfer } from "./api";
+import { api, errText, type ConnectRequest, type Session, type Snippet, type Transfer, type VaultStatus } from "./api";
 
 export type TabStatus = "connecting" | "open" | "closed" | "error";
 
@@ -100,6 +100,16 @@ class Store {
   sessions = $state<Session[]>([]);
   groups = $state<string[]>([]);
   shells = $state<string[]>([]);
+  /** Ana parola durumu; tanımlı ve kilitliyse kilit ekranı gösterilir. */
+  vault = $state<VaultStatus>({ enabled: false, unlocked: false });
+
+  get locked() {
+    return this.vault.enabled && !this.vault.unlocked;
+  }
+
+  async loadVault() {
+    this.vault = await api.vaultStatus();
+  }
   transfers = $state<Transfer[]>([]);
   /** SSH sekmesi başına SFTP klasörü (termId → yol). */
   sftpPaths = $state<Record<string, string>>({});

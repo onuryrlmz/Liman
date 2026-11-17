@@ -8,6 +8,7 @@
   import TunnelDialog from "$lib/TunnelDialog.svelte";
   import AboutDialog from "$lib/AboutDialog.svelte";
   import HostKeyDialog from "$lib/HostKeyDialog.svelte";
+  import LockScreen from "$lib/LockScreen.svelte";
   import SudoDialog from "$lib/SudoDialog.svelte";
   import SettingsDialog from "$lib/SettingsDialog.svelte";
   import SnippetList from "$lib/SnippetList.svelte";
@@ -64,7 +65,10 @@
   });
 
   onMount(() => {
-    store.loadSessions();
+    // Ana parola tanımlıysa oturumlar kilit açılınca yüklenir.
+    store.loadVault().then(() => {
+      if (!store.locked) store.loadSessions();
+    });
     store.loadSnippets();
     settings.load().then(() => {
       if (settings.value.checkUpdates) updater.check(true);
@@ -704,6 +708,7 @@
 {#if tunnelTab}
   <TunnelDialog tab={tunnelTab} onClose={() => (tunnelTab = null)} />
 {/if}
+{#if store.locked}<LockScreen />{/if}
 <HostKeyDialog />
 <SudoDialog />
 {#if fileDrag.drag}

@@ -1274,6 +1274,8 @@ fn sftp_launch_modes() {
     assert_eq!(l(Some("/opt/sftp-server"), true), SftpLaunch::Sudo("/opt/sftp-server".into()));
 }
 
+// Sahte sudo bir kabuk betiği; Windows'ta çalışmaz.
+#[cfg(unix)]
 /// Gerçek sudo yerine: parola "dogru"; klasörde `nopasswd` varsa sormaz.
 fn fake_sudo(name: &str, nopasswd: bool) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("liman-fake-sudo-{name}-{}", std::process::id()));
@@ -1305,8 +1307,10 @@ exec "$@"
     bin
 }
 
+#[cfg(unix)]
 type SudoLog = Arc<Mutex<Vec<String>>>;
 
+#[cfg(unix)]
 /// Sorulduğunda `answers` sırayla verilir; sorular ve kabul edilen parola `log`a yazılır.
 fn sudo_auth(known: &[&str], answers: Vec<Option<(&'static str, bool)>>) -> (ssh::SudoAuth, SudoLog) {
     let log: SudoLog = Arc::default();
@@ -1326,6 +1330,7 @@ fn sudo_auth(known: &[&str], answers: Vec<Option<(&'static str, bool)>>) -> (ssh
     (auth, log)
 }
 
+#[cfg(unix)]
 async fn sudo_sftp(name: &str, nopasswd: bool, command: Option<&str>, auth: ssh::SudoAuth) -> Option<anyhow::Result<()>> {
     let mut params = test_params(None)?;
     let bin = fake_sudo(name, nopasswd);
@@ -1348,6 +1353,7 @@ async fn sudo_sftp(name: &str, nopasswd: bool, command: Option<&str>, auth: ssh:
     Some(res)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sftp_via_sudo() {
     // Bilinen parola doğru: sorulmaz. sftp-server yolu sunucuda aranır.
@@ -1382,4 +1388,58 @@ async fn sftp_via_sudo() {
     let e = sudo_sftp("uc-yanlis", false, None, auth).await.unwrap().unwrap_err();
     assert!(e.to_string().contains("3 incorrect password attempts"), "{e}");
     assert_eq!(*log.lock().unwrap(), vec!["sor retry=true", "sor retry=true"]);
+}
+
+#[test]
+fn master_password_vault() {
+    use crate::vault;
+    let dir = fresh_config("vault");
+    let a = store::save_session(session("a", Some("Ankara/Web"), store::AuthKind::Password), Some("gizli-a".into())).unwrap();
+    store::set_secret(&store::sudo_secret_id(&a.id), "sudo-a").unwrap();
+    store::create_group("Boş").unwrap();
+    assert!(store::enable_master("kisa").is_err());
+
+    store::enable_master("ana-parola-1").unwrap();
+    assert!(vault::enabled() && vault::unlocked());
+    // Düz kopyalar ve sistem kasasındaki parolalar silindi.
+    assert!(!dir.join("sessions.json").exists() && !dir.join("groups.json").exists());
+    let raw = std::fs::read_to_string(dir.join("vault.liman")).unwrap();
+    assert!(!raw.contains("gizli-a") && !raw.contains("Ankara"));
+    let os = store::TEST_SECRETS.lock().unwrap().clone().unwrap_or_default();
+    assert!(!os.contains_key(&a.id) && !os.contains_key(&store::sudo_secret_id(&a.id)));
+    assert_eq!(store::get_secret(&a.id).as_deref(), Some("gizli-a"));
+    assert!(store::enable_master("ana-parola-1").is_err());
+
+    // Açıkken yapılan değişiklik kasaya yazılır.
+    let b = store::save_session(session("b", None, store::AuthKind::Password), Some("gizli-b".into())).unwrap();
+
+    vault::lock();
+    let e = store::load_sessions().unwrap_err();
+    assert_eq!(e.to_string(), vault::LOCKED);
+    assert!(store::get_secret(&a.id).is_none());
+    assert!(vault::unlock("yanlis-parola").is_err());
+    assert!(vault::check("yanlis-parola").is_err());
+    vault::check("ana-parola-1").unwrap();
+    vault::unlock("ana-parola-1").unwrap();
+    let names: Vec<_> = store::load_sessions().unwrap().into_iter().map(|s| s.name).collect();
+    assert_eq!(names, vec!["a", "b"]);
+    assert_eq!(store::load_groups().unwrap(), vec!["Ankara", "Ankara/Web", "Boş"]);
+    assert_eq!(store::get_secret(&b.id).as_deref(), Some("gizli-b"));
+
+    vault::change("ana-parola-1", "ana-parola-2").unwrap();
+    vault::lock();
+    assert!(vault::unlock("ana-parola-1").is_err());
+    vault::unlock("ana-parola-2").unwrap();
+
+    // Oturum silinince parolası ve sudo parolası da kasadan gider.
+    store::delete_session(&b.id).unwrap();
+    assert!(store::get_secret(&b.id).is_none());
+
+    assert!(store::disable_master("ana-parola-1").is_err());
+    store::disable_master("ana-parola-2").unwrap();
+    assert!(!vault::enabled() && !dir.join("vault.liman").exists());
+    assert_eq!(store::load_sessions().unwrap().len(), 1);
+    assert_eq!(store::get_secret(&a.id).as_deref(), Some("gizli-a"));
+    assert_eq!(store::get_secret(&store::sudo_secret_id(&a.id)).as_deref(), Some("sudo-a"));
+    let _ = std::fs::remove_dir_all(dir);
 }

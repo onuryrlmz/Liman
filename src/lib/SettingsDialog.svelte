@@ -4,6 +4,8 @@
   import Modal from "./Modal.svelte";
   import { api } from "./api";
   import Updater from "./Updater.svelte";
+  import MasterPasswordDialog from "./MasterPasswordDialog.svelte";
+  import { store } from "./tabs.svelte";
   import { settings, themes, fonts, defaults, MIN_FONT, MAX_FONT } from "./settings.svelte";
 
   let { onClose }: { onClose: () => void } = $props();
@@ -20,6 +22,7 @@
   }
 
   const mod = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl";
+  let master = $state<"enable" | "change" | "disable" | null>(null);
 </script>
 
 <Modal title="Ayarlar" width={520} {onClose}>
@@ -153,6 +156,26 @@
     </section>
 
     <section>
+      <h3>Güvenlik</h3>
+      {#if store.vault.enabled}
+        <p class="hint">
+          Ana parola açık: oturumlar ve kayıtlı parolalar şifreli tutuluyor. Liman açılışta ve dışarı aktarırken ana
+          parolayı sorar.
+        </p>
+        <div class="row">
+          <button class="btn" onclick={() => (master = "change")}>Ana parolayı değiştir</button>
+          <button class="btn" onclick={() => (master = "disable")}>Ana parolayı kaldır</button>
+        </div>
+      {:else}
+        <p class="hint">
+          Ana parola belirlerseniz oturumlar ve kayıtlı parolalar bu parolayla şifrelenir; Liman açılışta ve dışarı
+          aktarırken sorar.
+        </p>
+        <div class="row"><button class="btn" onclick={() => (master = "enable")}>Ana parola belirle…</button></div>
+      {/if}
+    </section>
+
+    <section>
       <h3>Güncellemeler</h3>
       <label class="check">
         <input type="checkbox" checked={s.checkUpdates} onchange={(e) => settings.update({ checkUpdates: e.currentTarget.checked })} />
@@ -167,6 +190,10 @@
     <button class="btn primary" onclick={onClose}>Tamam</button>
   {/snippet}
 </Modal>
+
+{#if master}
+  <MasterPasswordDialog mode={master} onClose={() => (master = null)} />
+{/if}
 
 <style>
   .sections {

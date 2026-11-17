@@ -12,6 +12,7 @@
     type ImportResult,
   } from "./api";
   import { store } from "./tabs.svelte";
+  import { inGroup } from "./groups";
 
   let {
     mode: initialMode,
@@ -29,12 +30,14 @@
   let password = $state("");
   let confirm = $state("");
   let showPw = $state(false);
+  /** Ana parola tanımlıysa dışarı aktarmadan önce sorulur. */
+  let master = $state("");
 
   const scopeCount = $derived(
-    scope === "" ? store.sessions.length : store.sessions.filter((s) => s.folder === scope).length,
+    scope === "" ? store.sessions.length : store.sessions.filter((s) => s.folder && inGroup(s.folder, scope)).length,
   );
   const savedSecrets = $derived(
-    store.sessions.filter((s) => (scope === "" || s.folder === scope) && s.hasSecret).length,
+    store.sessions.filter((s) => (scope === "" || (s.folder && inGroup(s.folder, scope))) && s.hasSecret).length,
   );
   const pwError = $derived(
     !withSecrets
@@ -45,7 +48,11 @@
           ? "Parolalar eşleşmiyor."
           : "",
   );
-  const canExport = $derived(scopeCount > 0 && (!withSecrets || (password.length >= 8 && confirm === password)));
+  const canExport = $derived(
+    scopeCount > 0 &&
+      (!withSecrets || (password.length >= 8 && confirm === password)) &&
+      (!store.vault.enabled || master.length > 0),
+  );
 
   function today() {
     const d = new Date();
@@ -64,7 +71,7 @@
     if (!path) return;
     busy = true;
     try {
-      const r = await api.sessionsExport(path, withSecrets ? password : null, scope || null);
+      const r = await api.sessionsExport(path, withSecrets ? password : null, scope || null, master || null);
       const extra = withSecrets ? `, ${r.secrets} parola, ${r.keys} anahtar` : "";
       store.notify(`${r.sessions} oturum dışarı aktarıldı${extra}.`);
       onClose();
@@ -148,7 +155,7 @@
         <select bind:value={scope}>
           <option value="">Tüm oturumlar ({store.sessions.length})</option>
           {#each store.groups as g}
-            <option value={g}>{g} ({store.sessions.filter((s) => s.folder === g).length})</option>
+            <option value={g}>{g} ({store.sessions.filter((s) => s.folder && inGroup(s.folder, g)).length})</option>
           {/each}
         </select>
       </label>
@@ -179,6 +186,12 @@
         </div>
       {:else}
         <p class="note">Dosya yalnızca sunucu, kullanıcı ve grup bilgilerini içerir; parola ve anahtar içermez.</p>
+      {/if}
+      {#if store.vault.enabled}
+        <label>
+          <span>Ana parola</span>
+          <input type="password" bind:value={master} autocomplete="current-password" placeholder="dışarı aktarmak için ana parolanızı girin" />
+        </label>
       {/if}
       {#if error}<p class="err">{error}</p>{/if}
       <button type="submit" hidden aria-hidden="true"></button>

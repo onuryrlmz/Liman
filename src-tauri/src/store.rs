@@ -155,6 +155,9 @@ pub fn forget_host_key(host: &str, port: u16) -> Result<()> {
 }
 
 pub fn load_sessions() -> Result<Vec<Session>> {
+    if crate::vault::enabled() {
+        return crate::vault::read(|d| d.sessions.clone());
+    }
     let path = sessions_path();
     if !path.exists() {
         return Ok(vec![]);
@@ -213,6 +216,9 @@ pub fn save_settings(value: &serde_json::Value) -> Result<()> {
 }
 
 pub(crate) fn write_sessions(sessions: &[Session]) -> Result<()> {
+    if crate::vault::enabled() {
+        return crate::vault::write(|d| d.sessions = sessions.to_vec());
+    }
     write_json(sessions_path(), sessions)
 }
 
@@ -263,7 +269,9 @@ fn with_parents(groups: Vec<String>) -> Vec<String> {
 
 pub fn load_groups() -> Result<Vec<String>> {
     let path = groups_path();
-    let mut groups: Vec<String> = if path.exists() {
+    let mut groups: Vec<String> = if crate::vault::enabled() {
+        crate::vault::read(|d| d.groups.clone())?
+    } else if path.exists() {
         serde_json::from_str(&fs::read_to_string(&path)?).unwrap_or_default()
     } else {
         vec![]
@@ -277,6 +285,9 @@ pub fn load_groups() -> Result<Vec<String>> {
 }
 
 pub(crate) fn write_groups(groups: &[String]) -> Result<()> {
+    if crate::vault::enabled() {
+        return crate::vault::write(|d| d.groups = groups.to_vec());
+    }
     write_json(groups_path(), groups)
 }
 
@@ -416,13 +427,82 @@ pub fn mark_secret_saved(id: &str) -> Result<()> {
     Ok(())
 }
 
+// Ana parola açıkken parolalar kasada, değilse sistem kasasında (Keychain / Credential
+// Manager / Secret Service) durur.
+
+pub fn set_secret(id: &str, secret: &str) -> Result<()> {
+    if crate::vault::enabled() {
+        return crate::vault::write(|d| {
+            d.secrets.insert(id.to_string(), secret.to_string());
+        });
+    }
+    os_set_secret(id, secret)
+}
+
+pub fn get_secret(id: &str) -> Option<String> {
+    if crate::vault::enabled() {
+        return crate::vault::read(|d| d.secrets.get(id).cloned()).ok().flatten();
+    }
+    os_get_secret(id)
+}
+
+/// Oturumun parolasını ve sudo parolasını siler.
+fn delete_secret(id: &str) {
+    if crate::vault::enabled() {
+        let _ = crate::vault::write(|d| {
+            d.secrets.remove(id);
+            d.secrets.remove(&sudo_secret_id(id));
+        });
+        return;
+    }
+    os_delete_secret(id);
+    os_delete_secret(&sudo_secret_id(id));
+}
+
+/// Ana parolayı açar: oturumlar, gruplar ve sistem kasasındaki parolalar şifreli kasaya taşınır.
+pub fn enable_master(password: &str) -> Result<()> {
+    if crate::vault::enabled() {
+        bail!("Ana parola zaten tanımlı");
+    }
+    let sessions = load_sessions()?;
+    let groups = load_groups()?;
+    let mut secrets = std::collections::HashMap::new();
+    for s in &sessions {
+        for id in [s.id.clone(), sudo_secret_id(&s.id)] {
+            if let Some(pw) = os_get_secret(&id) {
+                secrets.insert(id, pw);
+            }
+        }
+    }
+    let ids: Vec<String> = secrets.keys().cloned().collect();
+    crate::vault::create(password, crate::vault::Data { sessions, groups, secrets })?;
+    // Kasa yazıldıktan sonra düz kopyalar silinir.
+    let _ = fs::remove_file(sessions_path());
+    let _ = fs::remove_file(groups_path());
+    for id in ids {
+        os_delete_secret(&id);
+    }
+    Ok(())
+}
+
+/// Ana parolayı kaldırır: her şey düz dosyalara ve sistem kasasına geri döner.
+pub fn disable_master(password: &str) -> Result<()> {
+    let data = crate::vault::export_all(password)?;
+    write_json(sessions_path(), &data.sessions)?;
+    write_json(groups_path(), &data.groups)?;
+    for (id, pw) in &data.secrets {
+        os_set_secret(id, pw)?;
+    }
+    crate::vault::remove()
+}
+
 // Testlerde gerçek sistem kasası yerine bellekte tutulur.
 #[cfg(test)]
 pub static TEST_SECRETS: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> =
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
-pub fn set_secret(id: &str, secret: &str) -> Result<()> {
+fn os_set_secret(id: &str, secret: &str) -> Result<()> {
     TEST_SECRETS
         .lock()
         .unwrap()
@@ -432,44 +512,40 @@ pub fn set_secret(id: &str, secret: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-pub fn get_secret(id: &str) -> Option<String> {
+fn os_get_secret(id: &str) -> Option<String> {
     TEST_SECRETS.lock().unwrap().as_ref()?.get(id).cloned()
 }
 
 #[cfg(test)]
-fn delete_secret(id: &str) {
+fn os_delete_secret(id: &str) {
     if let Some(m) = TEST_SECRETS.lock().unwrap().as_mut() {
         m.remove(id);
-        m.remove(&sudo_secret_id(id));
     }
 }
 
 #[cfg(not(test))]
-pub fn set_secret(id: &str, secret: &str) -> Result<()> {
+fn os_set_secret(id: &str, secret: &str) -> Result<()> {
     keyring::Entry::new(SERVICE, id)
         .and_then(|e| e.set_password(secret))
         .context("Parola sistem kasasına kaydedilemedi")
 }
 
 #[cfg(not(test))]
-pub fn get_secret(id: &str) -> Option<String> {
+fn os_get_secret(id: &str) -> Option<String> {
     if let Ok(pw) = keyring::Entry::new(SERVICE, id).and_then(|e| e.get_password()) {
         return Some(pw);
     }
     // Eski adla kaydedilmiş parolayı yeni ada taşı.
     let old = keyring::Entry::new(LEGACY, id).ok()?;
     let pw = old.get_password().ok()?;
-    if set_secret(id, &pw).is_ok() {
+    if os_set_secret(id, &pw).is_ok() {
         let _ = old.delete_credential();
     }
     Some(pw)
 }
 
 #[cfg(not(test))]
-fn delete_secret(id: &str) {
-    if !id.ends_with("#sudo") {
-        delete_secret(&sudo_secret_id(id));
-    }
+fn os_delete_secret(id: &str) {
     for service in [SERVICE, LEGACY] {
         if let Ok(e) = keyring::Entry::new(service, id) {
             let _ = e.delete_credential();

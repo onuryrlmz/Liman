@@ -41,13 +41,26 @@ struct Payload {
     snippets: Vec<store::Snippet>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Kdf {
-    alg: String,
-    m: u32,
-    t: u32,
-    p: u32,
-    salt: String,
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct Kdf {
+    pub alg: String,
+    pub m: u32,
+    pub t: u32,
+    pub p: u32,
+    pub salt: String,
+}
+
+impl Kdf {
+    /// Yeni rastgele tuzla Argon2id (64 MB, 3 tur).
+    pub(crate) fn new() -> Result<Self> {
+        Ok(Kdf {
+            alg: "argon2id".into(),
+            m: 64 * 1024,
+            t: 3,
+            p: 1,
+            salt: B64.encode(random::<16>()?),
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -94,13 +107,13 @@ pub struct FileInfo {
     pub sessions: Option<usize>,
 }
 
-fn random<const N: usize>() -> Result<[u8; N]> {
+pub(crate) fn random<const N: usize>() -> Result<[u8; N]> {
     let mut b = [0u8; N];
     getrandom::fill(&mut b).map_err(|e| anyhow!("Rastgele sayı üretilemedi: {e}"))?;
     Ok(b)
 }
 
-fn derive_key(password: &str, kdf: &Kdf) -> Result<[u8; 32]> {
+pub(crate) fn derive_key(password: &str, kdf: &Kdf) -> Result<[u8; 32]> {
     if kdf.alg != "argon2id" {
         bail!("Desteklenmeyen anahtar türetme: {}", kdf.alg);
     }
@@ -113,7 +126,7 @@ fn derive_key(password: &str, kdf: &Kdf) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn cipher(key: &[u8; 32]) -> Result<XChaCha20Poly1305> {
+pub(crate) fn cipher(key: &[u8; 32]) -> Result<XChaCha20Poly1305> {
     XChaCha20Poly1305::new_from_slice(key).map_err(|_| anyhow!("Geçersiz anahtar"))
 }
 
@@ -190,13 +203,7 @@ pub fn export(path: &Path, password: Option<&str>, group: Option<&str>) -> Resul
     };
     match password {
         Some(pw) => {
-            let kdf = Kdf {
-                alg: "argon2id".into(),
-                m: 64 * 1024,
-                t: 3,
-                p: 1,
-                salt: B64.encode(random::<16>()?),
-            };
+            let kdf = Kdf::new()?;
             let key = derive_key(pw, &kdf)?;
             let nonce = XNonce::from(random::<24>()?);
             let plain = serde_json::to_vec(&payload)?;

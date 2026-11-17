@@ -49,6 +49,12 @@ export interface ConnectRequest {
   sftpCommand?: string | null;
 }
 
+export interface VaultStatus {
+  /** Ana parola tanımlı. */
+  enabled: boolean;
+  unlocked: boolean;
+}
+
 export interface SudoQuestion {
   id: string;
   user: string;
@@ -188,8 +194,13 @@ export const api = {
   groupCreate: (name: string) => invoke<void>("group_create", { name }),
   groupRename: (old: string, name: string) => invoke<void>("group_rename", { old, new: name }),
   groupDelete: (name: string, deleteSessions: boolean) => invoke<void>("group_delete", { name, deleteSessions }),
-  sessionsExport: (path: string, password: string | null, group: string | null) =>
-    invoke<ExportResult>("sessions_export", { path, password, group }),
+  sessionsExport: (path: string, password: string | null, group: string | null, master: string | null) =>
+    invoke<ExportResult>("sessions_export", { path, password, group, master }),
+  vaultStatus: () => invoke<VaultStatus>("vault_status"),
+  vaultUnlock: (password: string) => invoke<void>("vault_unlock", { password }),
+  vaultEnable: (password: string) => invoke<void>("vault_enable", { password }),
+  vaultDisable: (password: string) => invoke<void>("vault_disable", { password }),
+  vaultChange: (old: string, password: string) => invoke<void>("vault_change", { old, new: password }),
   sessionsImportInfo: (path: string) => invoke<BackupFileInfo>("sessions_import_info", { path }),
   telnetConnect: (host: string, port: number, cols: number, rows: number, onData: (d: Uint8Array) => void, logName: string) =>
     invoke<string>("telnet_connect", { host, port, cols, rows, onData: dataChannel(onData), logName }),
