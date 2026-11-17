@@ -118,15 +118,31 @@
   // Sekme çubuğu: sığmayınca sekmeler küçülür, sonra yatay kayar; etkin sekme hep görünür.
   let tabsEl = $state<HTMLDivElement>();
   let tabsOverflow = $state(false);
+  let tabsAtStart = $state(true);
+  let tabsAtEnd = $state(true);
 
   function measureTabs() {
-    if (tabsEl) tabsOverflow = tabsEl.scrollWidth > tabsEl.clientWidth + 1;
+    if (!tabsEl) return;
+    const max = tabsEl.scrollWidth - tabsEl.clientWidth;
+    tabsOverflow = max > 1;
+    tabsAtStart = tabsEl.scrollLeft <= 1;
+    tabsAtEnd = tabsEl.scrollLeft >= max - 1;
   }
 
+  // Tekerlek/izleme dörtgeni: dikey ya da yatay hareket sekmeleri yana kaydırır.
+  // Kaydırmayı kendimiz yapıyoruz; WebKit, Chromium ve WebView2 aynı davransın.
   function tabWheel(ev: WheelEvent) {
-    if (!tabsEl || Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) return;
+    if (!tabsEl || !tabsOverflow) return;
+    const d = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+    const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? tabsEl.clientWidth : 1;
     ev.preventDefault();
-    tabsEl.scrollLeft += ev.deltaY;
+    tabsEl.scrollLeft += d * unit;
+    measureTabs();
+  }
+
+  function scrollTabs(dir: number) {
+    if (!tabsEl) return;
+    tabsEl.scrollBy({ left: dir * Math.max(120, tabsEl.clientWidth * 0.7), behavior: "smooth" });
   }
 
   function tabList(ev: MouseEvent) {
@@ -479,6 +495,11 @@
     <section class="work">
       <nav class="tabbar">
         <!-- svelte-ignore a11y_no_static_element_interactions -->
+        {#if tabsOverflow}
+          <button class="newtab arrow" title="Sola kaydır" disabled={tabsAtStart} onclick={() => scrollTabs(-1)}
+            ><Icon name="chevronLeft" size={14} /></button
+          >
+        {/if}
         <div class="tabs" bind:this={tabsEl} onwheel={tabWheel} onscroll={measureTabs}>
         {#each store.views as view (view.key)}
           {@const tab = store.pane(view.focus)}
@@ -511,6 +532,9 @@
         {/each}
         </div>
         {#if tabsOverflow}
+          <button class="newtab arrow" title="Sağa kaydır" disabled={tabsAtEnd} onclick={() => scrollTabs(1)}
+            ><Icon name="chevron" size={14} /></button
+          >
           <button class="newtab" title="Tüm sekmeler" onclick={tabList}><Icon name="chevronDown" size={14} /></button>
         {/if}
         <button class="newtab" title="Yeni yerel terminal" onclick={() => store.openLocal()}><Icon name="plus" size={14} /></button>
@@ -1123,9 +1147,16 @@
     color: var(--muted);
     cursor: pointer;
   }
-  .newtab:hover {
+  .newtab:hover:not(:disabled) {
     color: var(--text);
     background: var(--hover);
+  }
+  .newtab.arrow {
+    width: 24px;
+  }
+  .newtab:disabled {
+    opacity: 0.3;
+    cursor: default;
   }
   .panes {
     position: relative;
