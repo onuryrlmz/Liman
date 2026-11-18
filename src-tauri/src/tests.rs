@@ -291,6 +291,14 @@ async fn ssh_wrong_key_reports_auth_failed() {
 
 // ---------- Gruplar ve dışarı/içeri aktarma ----------
 
+/// `store::TEST_SECRETS` bütün testlerde ortaktır; onu sıfırlayan ya da okuyan testler aynı
+/// anda çalışırsa birbirinin parolalarını siler (Windows CI'da oldu). Bu kilitle sıraya girerler.
+static SECRETS_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn secrets_guard() -> std::sync::MutexGuard<'static, ()> {
+    SECRETS_GUARD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn fresh_config(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("liman-{name}-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -382,6 +390,7 @@ fn nested_groups() {
 
 #[test]
 fn export_import_roundtrip_with_secrets() {
+    let _secrets = secrets_guard();
     use crate::backup;
 
     // --- Kaynak makine ---
@@ -709,6 +718,7 @@ const MR_FULL: &str = "RYRuhXHet4Og8KXL5mssQ3gsu4AQVtWciZPyTD9kt7pWTL7DzHY4HL7Td
 
 #[test]
 fn parses_mremoteng_connections() {
+    let _secrets = secrets_guard();
     use crate::importers::{parse_mremoteng, MREMOTENG_PASSWORD_REQUIRED};
     let xml = format!(
         r#"<?xml version="1.0" encoding="utf-8"?>
@@ -1476,6 +1486,7 @@ async fn sftp_via_sudo() {
 
 #[test]
 fn master_password_vault() {
+    let _secrets = secrets_guard();
     use crate::vault;
     let dir = fresh_config("vault");
     let a = store::save_session(session("a", Some("Ankara/Web"), store::AuthKind::Password), Some("gizli-a".into())).unwrap();
