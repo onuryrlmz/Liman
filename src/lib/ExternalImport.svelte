@@ -1,13 +1,22 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
-  import { api, errText, type Session } from "./api";
+  import { api, errText, MREMOTENG_PASSWORD_REQUIRED, type ImportSource, type Session } from "./api";
   import { store } from "./tabs.svelte";
 
-  let { source, onDone }: { source: "ssh-config" | "mobaxterm"; onDone: () => void } = $props();
+  let { source, onDone }: { source: ImportSource; onDone: () => void } = $props();
+
+  const fileSources: Record<"mobaxterm" | "mremoteng", { title: string; filters: { name: string; extensions: string[] }[] }> = {
+    mobaxterm: { title: "MobaXterm oturum dosyası", filters: [{ name: "MobaXterm", extensions: ["mxtsessions", "ini"] }] },
+    mremoteng: { title: "mRemoteNG bağlantı dosyası", filters: [{ name: "mRemoteNG", extensions: ["xml"] }] },
+  };
 
   let sessions = $state<Session[]>([]);
   let unsupported = $state(0);
+  let lockedPasswords = $state(0);
+  let needsPassword = $state(false);
+  let path = $state<string | null>(null);
+  let filePw = $state("");
   let selected = $state<Set<string>>(new Set());
   let loaded = $state(false);
   let busy = $state(false);
@@ -17,32 +26,54 @@
   const existingKeys = $derived(new Set(store.sessions.map((s) => `${s.host.toLowerCase()}|${s.port}|${s.username}|${s.kind ?? "ssh"}`)));
   const isDup = (s: Session) => existingKeys.has(`${s.host.toLowerCase()}|${s.port}|${s.username}|${s.kind ?? "ssh"}`);
 
-  async function load(path: string | null) {
+  async function load(file: string | null, password: string | null = null) {
     error = "";
     result = null;
     busy = true;
+    path = file;
     try {
-      const p = await api.importPreview(source, path);
+      const p = await api.importPreview(source, file, password);
       sessions = p.sessions;
       unsupported = p.unsupported;
+      lockedPasswords = p.lockedPasswords;
+      needsPassword = p.needsPassword;
       selected = new Set(p.sessions.filter((s) => !isDup(s)).map((s) => s.id));
       loaded = true;
     } catch (e) {
-      error = errText(e);
+      const msg = errText(e);
+      if (msg.includes(MREMOTENG_PASSWORD_REQUIRED)) {
+        // Tüm dosya şifreli: oturumları görmek için bile parola gerekir.
+        sessions = [];
+        needsPassword = true;
+        loaded = false;
+      } else {
+        error = msg;
+      }
     } finally {
       busy = false;
     }
   }
 
   async function pick() {
+    const fs = source === "ssh-config" ? null : fileSources[source];
     const p = await open({
-      title: source === "mobaxterm" ? "MobaXterm oturum dosyası" : "SSH config dosyası",
+      title: fs?.title ?? "SSH config dosyası",
       multiple: false,
       directory: false,
-      filters: source === "mobaxterm" ? [{ name: "MobaXterm", extensions: ["mxtsessions", "ini"] }] : undefined,
+      filters: fs?.filters,
     });
-    if (typeof p === "string") load(p);
+    if (typeof p === "string") {
+      filePw = "";
+      load(p);
+    }
   }
+
+  function unlock(e: SubmitEvent) {
+    e.preventDefault();
+    if (filePw) load(path, filePw);
+  }
+
+  const kindTag: Record<string, string> = { sftp: "SFTP", rdp: "RDP", vnc: "VNC", telnet: "Telnet" };
 
   function toggle(id: string) {
     const s = new Set(selected);
@@ -74,6 +105,12 @@
       <code>MobaXterm.ini</code>'yi seçin. SSH ve SFTP oturumları aktarılır;
       parolalar aktarılmaz.
     </p>
+  {:else if source === "mremoteng"}
+    <p class="note">
+      mRemoteNG'nin bağlantı dosyasını (<code>confCons.xml</code> ya da dışa aktarılmış <code>.xml</code>) seçin.
+      SSH, RDP, VNC ve Telnet bağlantıları klasörleriyle aktarılır. Parolalar Liman'ın parola kasasına kaydedilir;
+      dosya mRemoteNG'de bir parolayla korunuyorsa o parola sorulur.
+    </p>
   {:else}
     <p class="note">
       <code>~/.ssh/config</code> içindeki <code>Host</code> kayıtları; HostName, User, Port, IdentityFile ve ProxyJump
@@ -83,8 +120,22 @@
 
   <button class="btn" onclick={pick} disabled={busy}>
     <Icon name="file" size={14} />
-    {source === "mobaxterm" ? "Dosya seç…" : "Başka bir config dosyası seç…"}
+    {source === "ssh-config" ? "Başka bir config dosyası seç…" : "Dosya seç…"}
   </button>
+
+  {#if needsPassword && !result}
+    <form class="pw" onsubmit={unlock}>
+      <span>
+        {loaded
+          ? `Dosya parolayla korunuyor; ${lockedPasswords} oturumun parolası için mRemoteNG dosya parolasını girin. Girmezseniz oturumlar parolasız aktarılır.`
+          : "Dosyanın tamamı şifreli; oturumları görmek için mRemoteNG dosya parolasını girin."}
+      </span>
+      <div class="pwrow">
+        <input type="password" placeholder="mRemoteNG dosya parolası" bind:value={filePw} disabled={busy} />
+        <button class="btn" type="submit" disabled={busy || !filePw}>Çöz</button>
+      </div>
+    </form>
+  {/if}
 
   {#if result}
     <div class="result">
@@ -94,7 +145,11 @@
   {:else if loaded}
     {#if sessions.length}
       <div class="head">
-        <span>{sessions.length} oturum bulundu{unsupported ? `, ${unsupported} desteklenmeyen (RDP, VNC…) atlandı` : ""}</span>
+        <span
+          >{sessions.length} oturum bulundu{unsupported
+            ? `, ${unsupported} desteklenmeyen (${source === "mremoteng" ? "Rlogin, HTTP…" : "RDP, VNC…"}) atlandı`
+            : ""}{sessions.some((s) => s.hasSecret) ? `, ${sessions.filter((s) => s.hasSecret).length} parolalı` : ""}</span
+        >
         <button class="link" onclick={() => (selected = selected.size === sessions.length ? new Set() : new Set(sessions.map((s) => s.id)))}>
           {selected.size === sessions.length ? "Hiçbirini seçme" : "Tümünü seç"}
         </button>
@@ -104,8 +159,11 @@
           <label class="row" class:dup={isDup(s)}>
             <input type="checkbox" checked={selected.has(s.id)} onchange={() => toggle(s.id)} />
             <span class="name">{s.name}</span>
-            <span class="host">{s.username ? s.username + "@" : ""}{s.host}{s.port !== 22 ? ":" + s.port : ""}</span>
-            {#if s.kind === "sftp"}<span class="tag">SFTP</span>{/if}
+            <span class="host"
+              >{s.folder && source === "mremoteng" ? s.folder + " · " : ""}{s.username ? s.username + "@" : ""}{s.host}{s.port !== 22 ? ":" + s.port : ""}</span
+            >
+            {#if s.kind && kindTag[s.kind]}<span class="tag">{kindTag[s.kind]}</span>{/if}
+            {#if s.hasSecret}<span class="tag" title="Parola da aktarılacak"><Icon name="key" size={10} /></span>{/if}
             {#if s.jump}<span class="tag" title="Atlama sunucusu var">↪</span>{/if}
             {#if isDup(s)}<span class="tag">kayıtlı</span>{/if}
           </label>
@@ -200,6 +258,23 @@
     border-radius: 4px;
     font-size: 10px;
     color: var(--muted);
+  }
+  .pw {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--warn);
+    border-radius: 8px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .pwrow {
+    display: flex;
+    gap: 8px;
+  }
+  .pwrow input {
+    flex: 1;
   }
   .result {
     display: flex;

@@ -698,8 +698,8 @@ fn settings_set(value: serde_json::Value) -> CmdResult<()> {
 }
 
 #[tauri::command]
-fn import_preview(source: String, path: Option<String>) -> CmdResult<importers::Preview> {
-    importers::preview(&source, path.as_deref().map(std::path::Path::new)).map_err(err)
+fn import_preview(source: String, path: Option<String>, password: Option<String>) -> CmdResult<importers::Preview> {
+    importers::preview(&source, path.as_deref().map(std::path::Path::new), password.as_deref()).map_err(err)
 }
 
 #[tauri::command]

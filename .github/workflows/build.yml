@@ -98,3 +98,17 @@ jobs:
           releaseName: Liman ${{ github.ref_name }}
           releaseDraft: true
           args: ${{ matrix.args }}
+
+  # Tüm platformlar yüklenince sürüm "en son" olur; o ana kadar güncelleme denetimi önceki
+  # sürümün eksiksiz latest.json'unu görür.
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Sürümü en son olarak işaretle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ github.ref_name }}" --repo "${{ github.repository }}" --latest

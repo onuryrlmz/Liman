@@ -2897,8 +2897,9 @@ dependencies = [
 
 [[package]]
 name = "liman"
-version = "0.7.7"
+version = "0.8.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "argon2",
  "base64 0.23.1",
@@ -2912,12 +2913,15 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "pbkdf2",
  "portable-pty",
+ "quick-xml 0.42.0",
  "russh",
  "russh-sftp",
  "serde",
  "serde_json",
  "serialport",
+ "sha1",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",

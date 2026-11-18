@@ -28,5 +28,8 @@ mkdmg $U/Liman.app "$W/Liman_${V}_universal.dmg"
 # Güncelleme paketi (Liman_universal.app.tar.gz) ve latest.json'u yalnızca CI yükler. Burada da
 # yüklenirse CI dosyayı değiştirir ama latest.json'da yerel imza kalır ve Mac'te güncelleme
 # "signature verification failed" verir (0.7.2'de oldu).
-gh release create "v$V" --repo onuryrlmz/Liman --target main --title "Liman $V" --notes-file "$NOTES" \
+# --latest=false: CI tüm paketleri ve latest.json'u tamamlayınca sürümü "en son" yapar. Önce
+# işaretlenirse /releases/latest yarım latest.json'u gösterir ve güncelleme denetimi
+# "None of the fallback platforms ... were found" hatası verir (0.7.7'de oldu).
+gh release create "v$V" --repo onuryrlmz/Liman --target main --title "Liman $V" --notes-file "$NOTES" --latest=false \
   "$W/Liman_${V}_aarch64.dmg" "$W/Liman_${V}_universal.dmg"

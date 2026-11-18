@@ -698,6 +698,90 @@ fn parses_mobaxterm_sessions() {
     assert_eq!(f.folder.as_deref(), Some("Müşteri/Prod"));
 }
 
+// Şifreli değerler Python'un `cryptography` paketiyle, mRemoteNG biçiminde üretildi:
+// base64(tuz + nonce + AES-256-GCM(PBKDF2-HMAC-SHA1(parola, tuz, 1000)), ek veri = tuz).
+const MR_PROTECTED: &str = "Tfyd8RWB9p5ogCJhWps5PnsYaqODTstG/WxrLlTYHD+h63uY3htVQs8lcYWqvAtrlHHsJS18irQ3mdu2oqpm";
+const MR_PW_SSH: &str = "xb5zlfuovyi0Xhyy++HpIlGQDDDU64SLxZb+B3E6a9PN3EJpsTLxFAHvfPzNYowpXIZISY15SUc=";
+const MR_PW_RDP: &str = "DulEskp3MYJ15iVzw8KLSWlASQkM1byTMM0krJaHhj6pk6gLW+Zc5hlMHHAsxW0pwmve2eENgRQ=";
+const MR_NOT_PROTECTED: &str = "nA3Ath4fon8Bk3VxPtyEUKbrK75MMqGYdOMIO1QVU9FwXFYjn7FqbzFWtBe0PjFSHRS9cE3EIwMlPlWAH/Y1bV1M";
+const MR_PW_DEFAULT: &str = "/LvTo6W+tSxzLVKTMPmR8qF+BXpk3beo4YRe2p0ofB0+3fzW8lmeqxuacDiZH7CIhFe2iMoeP+MvZQ==";
+const MR_FULL: &str = "RYRuhXHet4Og8KXL5mssQ3gsu4AQVtWciZPyTD9kt7pWTL7DzHY4HL7TdIFB53u5Xnu4Tu6ngi7ablUDTtVaNZLpTkzITIDGCdLj//8S+SrY6GGV5x0f4DC9jY8fj3BIZ8rafXghHncpQ4QpsWkPSglfR1gN8HOYw5/YsgMk8XM8ZmiDkJqiP9KA/qPaX9ilCHIhehdgDQfq5m7WRthp3ZDAn3CKw3IdM01IFRIip4MZP1htdLIC3bW5R9C7IXEfU7PHw0yTwPdmM28PvWMJrYLye6WnwmoLOjrbzU2Rm0+um+gJUA8cs3sJg18=";
+
+#[test]
+fn parses_mremoteng_connections() {
+    use crate::importers::{parse_mremoteng, MREMOTENG_PASSWORD_REQUIRED};
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<mrng:Connections xmlns:mrng="http://mremoteng.org" Name="Bağlantılar" EncryptionEngine="AES" BlockCipherMode="GCM" KdfIterations="1000" FullFileEncryption="false" Protected="{MR_PROTECTED}" ConfVersion="2.6">
+    <Node Name="Müşteri &amp; Ortak" Type="Container" Username="kok" Domain="ACME" Password="" Port="22" Protocol="SSH2" Id="c1">
+        <Node Name="Prod" Type="Container" Username="" Password="" Protocol="SSH2" Port="22" Id="c2">
+            <Node Name="web" Type="Connection" Hostname="10.0.0.1" Protocol="SSH2" Port="2222" Username="onur" Password="{MR_PW_SSH}" InheritUsername="false" />
+            <Node Name="devralan" Type="Connection" Hostname="10.0.0.2" Protocol="SSH2" Port="22" Username="" Password="" InheritUsername="true" />
+        </Node>
+        <Node Name="dc" Type="Connection" Hostname="dc.acme.local" Protocol="RDP" Port="3389" Username="yonetici" Password="{MR_PW_RDP}" InheritDomain="true" />
+        <Node Name="eski" Type="Connection" Hostname="10.0.0.3" Protocol="Rlogin" Port="513" />
+    </Node>
+    <Node Name="yalnız" Type="Connection" Hostname="10.0.0.4" Protocol="Telnet" Port="" Username="" Password="" />
+    <Node Name="boş" Type="Connection" Hostname="" Protocol="SSH2" Port="22" />
+</mrng:Connections>"#
+    );
+    let secrets = |p: &crate::importers::Preview| p.sessions.iter().filter(|s| s.has_secret).count();
+
+    // Parola verilmeden: oturumlar listelenir, parolalar kilitli kalır.
+    let p = parse_mremoteng(&xml, None).unwrap();
+    assert!(p.needs_password);
+    assert_eq!((p.sessions.len(), p.unsupported, p.locked_passwords, secrets(&p)), (4, 1, 2, 0));
+    let e = parse_mremoteng(&xml, Some("yanlis")).err().unwrap().to_string();
+    assert!(e.contains("yanlış"), "{e}");
+
+    let p = parse_mremoteng(&xml, Some("gizli-parola")).unwrap();
+    assert!(!p.needs_password);
+    assert_eq!((p.sessions.len(), p.locked_passwords, secrets(&p)), (4, 0, 2));
+    let by = |n: &str| p.sessions.iter().find(|s| s.name == n).unwrap();
+    let web = by("web");
+    assert_eq!((web.host.as_str(), web.port, web.username.as_str(), web.kind), ("10.0.0.1", 2222, "onur", store::SessionKind::Ssh));
+    assert_eq!(web.folder.as_deref(), Some("Müşteri & Ortak/Prod"));
+    // Prod'un kullanıcısı boş ve devralmıyor; devralan Prod'dan boş alır.
+    assert_eq!(by("devralan").username, "");
+    let dc = by("dc");
+    assert_eq!((dc.kind, dc.port, dc.username.as_str()), (store::SessionKind::Rdp, 3389, "ACME\\yonetici"));
+    assert_eq!(dc.folder.as_deref(), Some("Müşteri & Ortak"));
+    let t = by("yalnız");
+    assert_eq!((t.kind, t.port, t.folder.as_deref()), (store::SessionKind::Telnet, 23, Some("mRemoteNG")));
+
+    // İçe aktarınca çözülen parolalar kasaya yazılır.
+    let dir = fresh_config("mremoteng");
+    let r = crate::importers::import(p.sessions.clone()).unwrap();
+    assert_eq!((r.added, r.skipped), (4, 0));
+    let saved = store::load_sessions().unwrap();
+    let web = saved.iter().find(|s| s.name == "web").unwrap();
+    assert!(web.has_secret);
+    assert_eq!(store::get_secret(&web.id).as_deref(), Some("Şifre!1"));
+    let dc = saved.iter().find(|s| s.name == "dc").unwrap();
+    assert_eq!(store::get_secret(&dc.id).as_deref(), Some("rdp-pass"));
+    assert!(!saved.iter().find(|s| s.name == "yalnız").unwrap().has_secret);
+    assert!(store::load_groups().unwrap().iter().any(|g| g == "Müşteri & Ortak/Prod"));
+    let _ = std::fs::remove_dir_all(dir);
+
+    // Varsayılan parola (mR3m): dosya korumasız, parola sormadan çözülür.
+    let plain = format!(
+        r#"<Connections Name="x" KdfIterations="1000" Protected="{MR_NOT_PROTECTED}"><Node Name="a" Type="Connection" Hostname="h" Protocol="SSH2" Port="22" Username="u" Password="{MR_PW_DEFAULT}"/></Connections>"#
+    );
+    let p = parse_mremoteng(&plain, None).unwrap();
+    assert!(!p.needs_password);
+    assert_eq!(secrets(&p), 1);
+
+    // Tüm dosya şifreli.
+    let full = format!(r#"<Connections Name="x" KdfIterations="1000" FullFileEncryption="true" Protected="{MR_NOT_PROTECTED}">{MR_FULL}</Connections>"#);
+    let p = parse_mremoteng(&full, None).unwrap();
+    assert_eq!(p.sessions.len(), 1);
+    assert_eq!((p.sessions[0].host.as_str(), p.sessions[0].username.as_str(), p.sessions[0].has_secret), ("10.9.9.9", "kok", true));
+    let locked = format!(r#"<Connections Name="x" KdfIterations="1000" FullFileEncryption="true" Protected="{MR_PROTECTED}">{MR_FULL}</Connections>"#);
+    assert!(parse_mremoteng(&locked, None).err().unwrap().to_string().contains(MREMOTENG_PASSWORD_REQUIRED));
+
+    assert!(parse_mremoteng("<foo/>", None).is_err());
+}
+
 #[test]
 fn import_skips_duplicates_and_relinks_jump() {
     let dir = fresh_config("import-dup");
@@ -1442,4 +1526,31 @@ fn master_password_vault() {
     assert_eq!(store::get_secret(&a.id).as_deref(), Some("gizli-a"));
     assert_eq!(store::get_secret(&store::sudo_secret_id(&a.id)).as_deref(), Some("sudo-a"));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Elle çalıştırılır: LIMAN_MREMOTENG=<dosya> cargo test --lib mremoteng_real_file -- --ignored --nocapture
+/// Gerçek dosyada yalnızca sayıları yazar; ad, adres ve parola yazmaz.
+#[test]
+#[ignore]
+fn mremoteng_real_file() {
+    let path = std::env::var("LIMAN_MREMOTENG").unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let pw = std::env::var("LIMAN_MREMOTENG_PASSWORD").ok();
+    let p = crate::importers::parse_mremoteng(&text, pw.as_deref()).unwrap();
+    let mut kinds = std::collections::BTreeMap::new();
+    for s in &p.sessions {
+        *kinds.entry(format!("{:?}", s.kind)).or_insert(0) += 1;
+    }
+    let folders: std::collections::BTreeSet<_> = p.sessions.iter().filter_map(|s| s.folder.clone()).collect();
+    let max_depth = folders.iter().map(|f| f.split('/').count()).max().unwrap_or(0);
+    println!(
+        "oturum={} desteklenmeyen={} parolalı={} kilitli={} parola_gerekli={} klasör={} derinlik={} türler={kinds:?}",
+        p.sessions.len(),
+        p.unsupported,
+        p.sessions.iter().filter(|s| s.has_secret).count(),
+        p.locked_passwords,
+        p.needs_password,
+        folders.len(),
+        max_depth
+    );
 }

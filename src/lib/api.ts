@@ -96,10 +96,19 @@ export interface HostKeyQuestion {
   changed: boolean;
 }
 
+export type ImportSource = "ssh-config" | "mobaxterm" | "mremoteng";
+
 export interface ImportPreview {
   sessions: Session[];
   unsupported: number;
+  /** Parolası çözülemeyen oturumlar. */
+  lockedPasswords: number;
+  /** mRemoteNG dosyası özel parolayla korunuyor. */
+  needsPassword: boolean;
 }
+
+/** Tüm dosya şifreli mRemoteNG dosyası; parola olmadan oturumlar bile okunamaz. */
+export const MREMOTENG_PASSWORD_REQUIRED = "MREMOTENG_PASSWORD_REQUIRED";
 
 export interface Entry {
   name: string;
@@ -218,8 +227,8 @@ export const api = {
   hostKeyAnswer: (id: string, accept: boolean) => invoke<void>("host_key_answer", { id, accept }),
   sudoAnswer: (id: string, password: string | null, remember: boolean) =>
     invoke<void>("sudo_answer", { id, password, remember }),
-  importPreview: (source: "ssh-config" | "mobaxterm", path: string | null) =>
-    invoke<ImportPreview>("import_preview", { source, path }),
+  importPreview: (source: ImportSource, path: string | null, password: string | null = null) =>
+    invoke<ImportPreview>("import_preview", { source, path, password }),
   importSessions: (sessions: Session[]) => invoke<{ added: number; skipped: number }>("import_sessions", { sessions }),
   snippetsList: () => invoke<Snippet[]>("snippets_list"),
   snippetsSave: (snippets: Snippet[]) => invoke<void>("snippets_save", { snippets }),

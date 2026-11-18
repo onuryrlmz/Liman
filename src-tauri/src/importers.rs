@@ -1,4 +1,4 @@
-//! Başka araçlardan oturum içe aktarma: OpenSSH `~/.ssh/config` ve MobaXterm.
+//! Başka araçlardan oturum içe aktarma: OpenSSH `~/.ssh/config`, MobaXterm ve mRemoteNG.
 
 use std::{collections::HashMap, fs, path::Path};
 
@@ -13,6 +13,10 @@ pub struct Preview {
     pub sessions: Vec<Session>,
     /// Desteklenmeyen türler (RDP, VNC, Telnet…) nedeniyle atlananlar.
     pub unsupported: usize,
+    /// Parolası çözülemeyen oturumlar (dosya parolası verilmedi ya da kayıt bozuk).
+    pub locked_passwords: usize,
+    /// Dosya özel bir parolayla korunuyor; parolalar için kullanıcıdan istenmeli.
+    pub needs_password: bool,
 }
 
 #[derive(Serialize)]
@@ -129,6 +133,8 @@ pub fn parse_ssh_config(text: &str) -> Preview {
     Preview {
         sessions,
         unsupported: 0,
+        locked_passwords: 0,
+        needs_password: false,
     }
 }
 
@@ -211,7 +217,212 @@ pub fn parse_mobaxterm(text: &str) -> Preview {
     Preview {
         sessions,
         unsupported,
+        locked_passwords: 0,
+        needs_password: false,
     }
+}
+
+// ---------- mRemoteNG ----------
+//
+// confCons.xml: iç içe <Node Type="Container|Connection" .../> öğeleri. Parolalar
+// AES-256-GCM ile şifreli: base64(tuz[16] + nonce[16] + şifreli metin + etiket[16]),
+// anahtar = PBKDF2-HMAC-SHA1(dosya parolası, tuz, KdfIterations), ek veri = tuz.
+// Dosyaya parola konmadıysa mRemoteNG varsayılan "mR3m" parolasını kullanır; kök öğedeki
+// Protected alanı "ThisIsNotProtected" (parolasız) ya da "ThisIsProtected" çözülür.
+
+/// Dosya özel bir parolayla korunuyor ve parola verilmedi.
+pub const MREMOTENG_PASSWORD_REQUIRED: &str = "MREMOTENG_PASSWORD_REQUIRED";
+const MREMOTENG_DEFAULT_PASSWORD: &str = "mR3m";
+
+/// Önizlemede çözülen parolalar; içe aktarırken oturum kimliğiyle eşleşir. Arayüze gönderilmez.
+static PENDING_SECRETS: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
+
+fn mremoteng_decrypt(b64: &str, password: &str, iterations: u32) -> Option<String> {
+    use aes_gcm::aead::{consts::U16, Aead, KeyInit, Nonce, Payload};
+    type Cipher = aes_gcm::AesGcm<aes_gcm::aes::Aes256, U16>;
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
+    if data.len() < 48 {
+        return None;
+    }
+    let (salt, rest) = data.split_at(16);
+    let (nonce, msg) = rest.split_at(16);
+    let mut key = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password.as_bytes(), salt, iterations, &mut key);
+    let cipher = Cipher::new_from_slice(&key).ok()?;
+    let nonce = Nonce::<Cipher>::try_from(nonce).ok()?;
+    let plain = cipher.decrypt(&nonce, Payload { msg, aad: salt }).ok()?;
+    String::from_utf8(plain).ok()
+}
+
+/// Bir <Node>: kendi alanları ve üst klasörden devralma bayrakları.
+struct MrNode {
+    attrs: HashMap<String, String>,
+}
+
+impl MrNode {
+    fn get(&self, k: &str) -> &str {
+        self.attrs.get(k).map(String::as_str).unwrap_or("")
+    }
+}
+
+/// `Inherit<alan>="true"` ise değeri üst klasörlerden alır.
+fn mr_value(stack: &[MrNode], node: &MrNode, field: &str) -> String {
+    let inherit_key = format!("Inherit{field}");
+    let mut current = node;
+    let mut depth = stack.len();
+    while current.get(&inherit_key) == "true" && depth > 0 {
+        depth -= 1;
+        current = &stack[depth];
+    }
+    current.get(field).to_string()
+}
+
+fn mr_attrs(e: &quick_xml::events::BytesStart) -> HashMap<String, String> {
+    e.attributes()
+        .flatten()
+        .filter_map(|a| {
+            let k = a.key.as_ref().to_string();
+            let v = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok()?.into_owned();
+            Some((k, v))
+        })
+        .collect()
+}
+
+/// mRemoteNG bağlantı dosyasını okur. Parolalar çözülebilirse `PENDING_SECRETS`'e konur.
+/// Dosya özel parolalıysa ve parola verilmediyse oturumlar parolasız listelenir, `locked` döner.
+pub fn parse_mremoteng(text: &str, password: Option<&str>) -> Result<Preview> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(text);
+    let mut root: Option<HashMap<String, String>> = None;
+    let mut root_text = String::new();
+    let mut stack: Vec<MrNode> = Vec::new();
+    let mut nodes: Vec<(Vec<String>, MrNode, Vec<MrNode>)> = Vec::new();
+    loop {
+        let ev = reader.read_event().context("mRemoteNG dosyası okunamadı (XML)")?;
+        match ev {
+            Event::Start(e) | Event::Empty(e) if root.is_none() => {
+                if !e.local_name().as_ref().eq_ignore_ascii_case("Connections") {
+                    anyhow::bail!("Bu bir mRemoteNG bağlantı dosyası değil");
+                }
+                root = Some(mr_attrs(&e));
+            }
+            Event::Start(ref e) | Event::Empty(ref e) if e.local_name().as_ref() == "Node" => {
+                let node = MrNode { attrs: mr_attrs(e) };
+                if node.get("Type") == "Connection" {
+                    let path = stack.iter().map(|n| n.get("Name").to_string()).collect();
+                    let parents = stack.iter().map(|n| MrNode { attrs: n.attrs.clone() }).collect();
+                    nodes.push((path, MrNode { attrs: node.attrs.clone() }, parents));
+                }
+                if matches!(ev, Event::Start(_)) {
+                    stack.push(node);
+                }
+            }
+            Event::End(e) if e.local_name().as_ref() == "Node" => {
+                stack.pop();
+            }
+            Event::Text(t) if root.is_some() && stack.is_empty() => {
+                root_text.push_str(t[..].trim());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let root = root.context("Bu bir mRemoteNG bağlantı dosyası değil")?;
+    let get = |k: &str| root.get(k).map(String::as_str).unwrap_or("");
+    let iterations = get("KdfIterations").parse().unwrap_or(1000).clamp(1, 1_000_000);
+
+    // Hangi parolayla açılacağını Protected alanı söyler.
+    let protected = get("Protected");
+    let file_password = if protected.is_empty()
+        || mremoteng_decrypt(protected, MREMOTENG_DEFAULT_PASSWORD, iterations).as_deref() == Some("ThisIsNotProtected")
+    {
+        Some(MREMOTENG_DEFAULT_PASSWORD.to_string())
+    } else {
+        match password.filter(|p| !p.is_empty()) {
+            None => None,
+            Some(p) if mremoteng_decrypt(protected, p, iterations).is_some() => Some(p.to_string()),
+            Some(_) => anyhow::bail!("mRemoteNG dosya parolası yanlış"),
+        }
+    };
+
+    // Tüm dosya şifreliyse bağlantılar kök öğenin içeriğinde, şifreli XML olarak durur.
+    if get("FullFileEncryption") == "true" && !root_text.is_empty() {
+        let Some(pw) = file_password.as_deref() else {
+            anyhow::bail!(MREMOTENG_PASSWORD_REQUIRED);
+        };
+        let inner = mremoteng_decrypt(&root_text, pw, iterations).context("mRemoteNG dosyası çözülemedi")?;
+        let mut attrs = String::new();
+        for (k, v) in &root {
+            if k != "FullFileEncryption" && !k.starts_with("xmlns") {
+                attrs.push_str(&format!(" {k}=\"{}\"", quick_xml::escape::escape(v.as_str())));
+            }
+        }
+        let wrapped = format!("<Connections{attrs}>{inner}</Connections>");
+        return parse_mremoteng(&wrapped, Some(pw));
+    }
+
+    let mut sessions = Vec::new();
+    let mut secrets = HashMap::new();
+    let mut unsupported = 0;
+    let mut locked_passwords = 0;
+    for (path, node, parents) in nodes {
+        let kind = match mr_value(&parents, &node, "Protocol").as_str() {
+            "SSH1" | "SSH2" => SessionKind::Ssh,
+            "Telnet" => SessionKind::Telnet,
+            "RDP" => SessionKind::Rdp,
+            "VNC" => SessionKind::Vnc,
+            _ => {
+                unsupported += 1;
+                continue;
+            }
+        };
+        let host = node.get("Hostname").trim().to_string();
+        if host.is_empty() {
+            continue;
+        }
+        let name = match node.get("Name").trim() {
+            "" => host.clone(),
+            n => n.to_string(),
+        };
+        let mut s = new_session(&name, &host);
+        s.kind = kind;
+        let default_port = match kind {
+            SessionKind::Rdp => 3389,
+            SessionKind::Vnc => 5900,
+            SessionKind::Telnet => 23,
+            _ => 22,
+        };
+        s.port = mr_value(&parents, &node, "Port").trim().parse().ok().filter(|p| *p > 0).unwrap_or(default_port);
+        let user = mr_value(&parents, &node, "Username").trim().to_string();
+        let domain = mr_value(&parents, &node, "Domain").trim().to_string();
+        s.username = if kind == SessionKind::Rdp && !domain.is_empty() && !user.is_empty() && !user.contains('\\') {
+            format!("{domain}\\{user}")
+        } else {
+            user
+        };
+        let folder: Vec<String> = path.iter().map(|p| p.replace('/', "-").trim().to_string()).filter(|p| !p.is_empty()).collect();
+        s.folder = Some(if folder.is_empty() { "mRemoteNG".into() } else { folder.join("/") });
+        let enc = mr_value(&parents, &node, "Password");
+        if !enc.is_empty() {
+            match file_password.as_deref().and_then(|pw| mremoteng_decrypt(&enc, pw, iterations)) {
+                Some(pw) if !pw.is_empty() => {
+                    s.has_secret = true;
+                    secrets.insert(s.id.clone(), pw);
+                }
+                Some(_) => {}
+                None => locked_passwords += 1,
+            }
+        }
+        sessions.push(s);
+    }
+    *PENDING_SECRETS.lock().unwrap() = Some(secrets);
+    Ok(Preview {
+        sessions,
+        unsupported,
+        locked_passwords,
+        needs_password: file_password.is_none(),
+    })
 }
 
 // ---------- Ortak ----------
@@ -225,7 +436,8 @@ fn read_lossy(path: &Path) -> Result<String> {
     })
 }
 
-pub fn preview(source: &str, path: Option<&Path>) -> Result<Preview> {
+pub fn preview(source: &str, path: Option<&Path>, password: Option<&str>) -> Result<Preview> {
+    *PENDING_SECRETS.lock().unwrap() = None;
     match source {
         "ssh-config" => {
             let path = match path {
@@ -240,6 +452,10 @@ pub fn preview(source: &str, path: Option<&Path>) -> Result<Preview> {
         "mobaxterm" => {
             let path = path.context("Dosya seçilmedi")?;
             Ok(parse_mobaxterm(&read_lossy(path)?))
+        }
+        "mremoteng" => {
+            let path = path.context("Dosya seçilmedi")?;
+            parse_mremoteng(&read_lossy(path)?, password)
         }
         other => anyhow::bail!("Bilinmeyen kaynak: {other}"),
     }
@@ -267,7 +483,10 @@ pub fn import(sessions: Vec<Session>) -> Result<Imported> {
         if let Some(j) = s.jump.as_ref().and_then(|j| renamed.get(j)) {
             s.jump = Some(j.clone());
         }
-        store::save_session(s, None)?;
+        // Parola yalnızca önizlemede çözüldüyse kaydedilir; arayüzden gelen bayrağa güvenilmez.
+        s.has_secret = false;
+        let secret = PENDING_SECRETS.lock().unwrap().as_mut().and_then(|m| m.remove(&s.id));
+        store::save_session(s, secret)?;
         res.added += 1;
     }
     Ok(res)

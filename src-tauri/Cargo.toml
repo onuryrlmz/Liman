@@ -1,6 +1,6 @@
 [package]
 name = "liman"
-version = "0.7.7"
+version = "0.8.0"
 description = "SSH, SFTP ve yerel terminal istemcisi"
 authors = ["onuryrlmz"]
 edition = "2021"
@@ -35,6 +35,11 @@ tauri-plugin-dialog = "2.8.0"
 tauri-plugin-clipboard-manager = "2.4.0"
 argon2 = "0.6.0"
 chacha20poly1305 = "0.11.0"
+# mRemoteNG dosyalarındaki parolalar: AES-256-GCM + PBKDF2-HMAC-SHA1.
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
+pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
+sha1 = { version = "0.11.0", default-features = false }
+quick-xml = "0.42.0"
 getrandom = "0.4.3"
 tauri-plugin-updater = "2.13.0"
 tauri-plugin-process = "2.4.0"

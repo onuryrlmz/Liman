@@ -83,7 +83,7 @@
   }
 
   // --- İçeri aktarma ---
-  let importSource = $state<"liman" | "ssh-config" | "mobaxterm">("liman");
+  let importSource = $state<"liman" | "ssh-config" | "mobaxterm" | "mremoteng">("liman");
   let file = $state<string | null>(null);
   let info = $state<BackupFileInfo | null>(null);
   let importPw = $state("");
@@ -198,7 +198,7 @@
     </form>
   {:else}
     <div class="sources" role="radiogroup" aria-label="Kaynak">
-      {#each [["liman", "Liman dosyası"], ["ssh-config", "OpenSSH config"], ["mobaxterm", "MobaXterm"]] as [key, label]}
+      {#each [["liman", "Liman dosyası"], ["ssh-config", "OpenSSH config"], ["mobaxterm", "MobaXterm"], ["mremoteng", "mRemoteNG"]] as [key, label]}
         <button
           role="radio"
           aria-checked={importSource === key}
