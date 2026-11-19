@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { openPath } from "@tauri-apps/plugin-opener";
-  import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+  import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
   import Icon from "./Icon.svelte";
   import { api, errText } from "./api";
   import { openVia } from "./via";
@@ -18,6 +18,24 @@
   let target = $state("");
   let file = $state("");
   let viaId: string | null = null;
+  // Parola durumu: istemciye verildi (Windows) ya da panoya kopyalandı (macOS/Linux).
+  let pw = $state<"none" | "given" | "copied">("none");
+  let hasPassword = $state(false);
+  let clearTimer: ReturnType<typeof setTimeout> | undefined;
+  const pasteKey = navigator.platform.toLowerCase().includes("mac") ? "⌘V" : "Ctrl+V";
+
+  /** Kayıtlı parolayı panoya kopyalar; 60 sn sonra pano hâlâ onu içeriyorsa temizler. */
+  async function copyPassword() {
+    if (!tab.sessionId) return;
+    const secret = await api.sessionPassword(tab.sessionId).catch(() => null);
+    if (!secret) return;
+    await writeText(secret);
+    pw = "copied";
+    clearTimeout(clearTimer);
+    clearTimer = setTimeout(async () => {
+      if ((await readText().catch(() => null)) === secret) await writeText("");
+    }, 60_000);
+  }
   const isMac = navigator.platform.toLowerCase().includes("mac");
   const clientHint = navigator.platform.startsWith("Win")
     ? "Windows'un Uzak Masaüstü Bağlantısı (mstsc) açılır."
@@ -39,7 +57,12 @@
         if (viaId) api.termClose(viaId);
         return;
       }
-      [file, target] = await api.rdpPrepare(host, port, username, viaId);
+      const r = await api.rdpPrepare(host, port, username, viaId, tab.sessionId ?? null);
+      file = r.file;
+      target = r.target;
+      hasPassword = r.hasPassword;
+      pw = r.passwordGiven ? "given" : "none";
+      if (r.hasPassword && !r.passwordGiven) await copyPassword();
       await openPath(file);
       phase = "open";
       onUpdate({ status: "open" });
@@ -58,6 +81,7 @@
   let destroyed = false;
   onDestroy(() => {
     destroyed = true;
+    clearTimeout(clearTimer);
     if (viaId) api.termClose(viaId);
   });
 </script>
@@ -75,6 +99,11 @@
       <p class="muted">{clientHint}</p>
     {:else}
       <p>Bağlantı bilgisayarınızdaki RDP istemcisinde açıldı.</p>
+      {#if pw === "given"}
+        <p class="muted">Kayıtlı parola istemciye verildi.</p>
+      {:else if pw === "copied"}
+        <p class="muted">Kayıtlı parola panoya kopyalandı; istemci parola sorunca {pasteKey} ile yapıştırın. 60 saniye sonra panodan silinir.</p>
+      {/if}
       {#if viaId}
         <p class="muted">
           SSH tüneli açık: istemci <code>{target}</code> adresine bağlanıyor. Tünel bu sekme açık kaldıkça çalışır.
@@ -86,6 +115,9 @@
       <button class="btn primary" onclick={launch} disabled={phase === "connecting"}>Yeniden aç</button>
       {#if target}
         <button class="btn" onclick={() => writeText(target)}>Adresi kopyala</button>
+      {/if}
+      {#if hasPassword}
+        <button class="btn" onclick={copyPassword}>Parolayı kopyala</button>
       {/if}
     </div>
   </div>

@@ -222,16 +222,20 @@
         <span>Kullanıcı adı {form.kind === "vnc" ? "(bazı VNC sunucuları ister)" : ""}</span>
         <input bind:value={form.username} placeholder="isteğe bağlı" spellcheck="false" />
       </label>
-      {#if form.kind === "vnc"}
+      {#if isDesktop}
         <label class="full">
-          <span>VNC parolası</span>
+          <span>{form.kind === "rdp" ? "Parola" : "VNC parolası"}</span>
           <input
             type="password"
             bind:value={secret}
             disabled={forget}
             placeholder={session?.hasSecret ? "•••••• (kayıtlı, değiştirmek için yazın)" : "boş bırakılırsa bağlanırken sorulur"}
           />
-          <small>Parola işletim sisteminin kasasında tutulur.</small>
+          <small
+            >Parola işletim sisteminin kasasında tutulur.{form.kind === "rdp"
+              ? " Windows'ta Uzak Masaüstü'ne otomatik verilir; Mac ve Linux'ta bağlanırken panoya kopyalanır."
+              : ""}</small
+          >
         </label>
         {#if session?.hasSecret}
           <label class="check full"><input type="checkbox" bind:checked={forget} /> Kayıtlı parolayı sil</label>

@@ -5,7 +5,7 @@
   import BackupDialog from "./BackupDialog.svelte";
   import { api, errText, kindInfo, type Session } from "./api";
   import { store } from "./tabs.svelte";
-  import { buildTree, inGroup, parentOf, type GroupNode } from "./groups";
+  import { buildTree, inGroup, leafName, parentOf, type GroupNode } from "./groups";
 
   let { onEdit }: { onEdit: (s: Session | null, folder?: string | null) => void } = $props();
 
@@ -74,13 +74,16 @@
     run(() => api.sessionMove(s.id, folder));
   }
 
+  /** Grubu `parent`'ın altına (null: en üste) taşır; kendi alt ağacına taşınamaz. */
+  function moveGroup(g: string, parent: string | null) {
+    if (parent !== null && inGroup(parent, g)) return;
+    const full = parent ? `${parent}/${leafName(g)}` : leafName(g);
+    if (full !== g) run(() => api.groupRename(g, full));
+  }
+
   /** Grubu başka bir grubun altına (ya da en üste) taşır. */
   function moveGroupMenu(x: number, y: number, g: string) {
-    const name = g.slice((parentOf(g)?.length ?? -1) + 1);
-    const to = (parent: string | null) => {
-      const full = parent ? `${parent}/${name}` : name;
-      if (full !== g) run(() => api.groupRename(g, full));
-    };
+    const to = (parent: string | null) => moveGroup(g, parent);
     const items: (MenuItem | null)[] = store.groups
       .filter((x) => !inGroup(x, g))
       .map((x) => ({ label: x, icon: "folder", disabled: parentOf(g) === x, action: () => to(x) }));
@@ -202,13 +205,25 @@
   // Tarayıcının HTML5 sürükle-bırakı Windows'ta Tauri'nin dosya bırakma özelliğiyle çakıştığı
   // için işaretçi olaylarıyla yapıyoruz.
 
-  let press: { s: Session; x: number; y: number } | null = null;
-  let drag = $state<{ s: Session; x: number; y: number; target: string | null } | null>(null);
+  // Sürüklenen şey bir oturum ya da bir grup (alt gruplarıyla birlikte taşınır).
+  type Dragged = { s: Session; g?: undefined } | { g: string; s?: undefined };
+
+  let press: { item: Dragged; x: number; y: number } | null = null;
+  let drag = $state<{ item: Dragged; x: number; y: number; target: string | null } | null>(null);
   let justDragged = false;
 
-  function onPointerDown(ev: PointerEvent, s: Session) {
+  const dragLabel = (d: Dragged) => (d.s ? d.s.name : leafName(d.g));
+
+  /** Bırakılabilecek hedef mi? Grup kendi içine ya da zaten bulunduğu yere bırakılmaz. */
+  function validTarget(d: Dragged, target: string): boolean {
+    if (d.s) return true;
+    if (target === "") return parentOf(d.g) !== null;
+    return !inGroup(target, d.g) && parentOf(d.g) !== target;
+  }
+
+  function onPointerDown(ev: PointerEvent, item: Dragged) {
     if (ev.button !== 0) return;
-    press = { s, x: ev.clientX, y: ev.clientY };
+    press = { item, x: ev.clientX, y: ev.clientY };
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp, { once: true });
   }
@@ -217,13 +232,15 @@
     if (!press) return;
     if (!drag && Math.hypot(ev.clientX - press.x, ev.clientY - press.y) < 6) return;
     const el = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>("[data-drop]");
-    drag = { s: press.s, x: ev.clientX, y: ev.clientY, target: el ? (el.dataset.drop ?? null) : null };
+    const t = el?.dataset.drop ?? null;
+    drag = { item: press.item, x: ev.clientX, y: ev.clientY, target: t !== null && validTarget(press.item, t) ? t : null };
   }
 
   function onPointerUp() {
     window.removeEventListener("pointermove", onPointerMove);
     if (drag) {
-      if (drag.target !== null) move(drag.s, drag.target === "" ? null : drag.target);
+      const to = drag.target === "" ? null : drag.target;
+      if (drag.target !== null) drag.item.s ? move(drag.item.s, to) : moveGroup(drag.item.g!, to);
       justDragged = true;
       setTimeout(() => (justDragged = false));
     }
@@ -240,11 +257,11 @@
   <button
     class="item"
     style:padding-left={depth ? `${10 + depth * 14}px` : undefined}
-    class:dragging={drag?.s.id === s.id}
+    class:dragging={drag?.item.s?.id === s.id}
     ondblclick={() => open(s)}
     onkeydown={(e) => e.key === "Enter" && store.openSession(s)}
     oncontextmenu={(e) => sessionMenu(e, s)}
-    onpointerdown={(e) => onPointerDown(e, s)}
+    onpointerdown={(e) => onPointerDown(e, { s })}
     title="{s.username ? s.username + '@' : ''}{s.host}:{s.port}  (çift tıkla: bağlan, sürükle: gruba taşı)"
   >
     <span class="ic"><Icon name={kindInfo[s.kind ?? "ssh"].icon} size={14} /></span>
@@ -273,11 +290,13 @@
       {:else}
         <button
           class="folder"
+          class:dragging={drag?.item.g === node.path}
           style:padding-left={indent(depth)}
-          onclick={() => toggle(node.path)}
+          onpointerdown={(e) => onPointerDown(e, { g: node.path })}
+          onclick={() => !justDragged && toggle(node.path)}
           ondblclick={() => startRename(node.path)}
           oncontextmenu={(e) => groupMenu(e, node.path)}
-          title={node.path}
+          title="{node.path}  (sürükle: başka bir grubun içine taşı)"
         >
           <span class="chev" class:open><Icon name="chevron" size={12} /></span>
           <Icon name="folder" size={14} />
@@ -353,13 +372,13 @@
       {@render groupNode(node, 0)}
     {/each}
 
-    {#if ungrouped.length || (drag && drag.s.folder)}
+    {#if ungrouped.length || (drag && (drag.item.s ? drag.item.s.folder : parentOf(drag.item.g)))}
       <div class="group loose" class:drop={drag?.target === ""} data-drop="">
-        {#if tree.length}<div class="folder plain">Grupsuz</div>{/if}
+        {#if tree.length}<div class="folder plain">{drag?.item.g ? "En üst düzey" : "Grupsuz"}</div>{/if}
         {#each ungrouped as s (s.id)}
           {@render sessionRow(s, 0)}
         {:else}
-          <div class="empty-group">Gruptan çıkarmak için buraya bırakın</div>
+          <div class="empty-group">{drag?.item.g ? "En üst düzeye taşımak için buraya bırakın" : "Gruptan çıkarmak için buraya bırakın"}</div>
         {/each}
       </div>
     {/if}
@@ -380,9 +399,9 @@
 
 {#if drag}
   <div class="ghost" style:left="{drag.x + 12}px" style:top="{drag.y + 8}px">
-    <Icon name="server" size={13} />
-    {drag.s.name}
-    {#if drag.target !== null}<span>→ {drag.target || "Grupsuz"}</span>{/if}
+    <Icon name={drag.item.g ? "folder" : "server"} size={13} />
+    {dragLabel(drag.item)}
+    {#if drag.target !== null}<span>→ {drag.target || (drag.item.g ? "En üst düzey" : "Grupsuz")}</span>{/if}
   </div>
 {/if}
 {#if menu}
@@ -498,7 +517,8 @@
     padding: 5px 8px;
     touch-action: none;
   }
-  button.item.dragging {
+  button.item.dragging,
+  button.folder.dragging {
     opacity: 0.4;
   }
   button.item:hover,

@@ -447,7 +447,20 @@ fn session_password(session_id: String) -> CmdResult<Option<String>> {
     Ok(store::get_secret(&s.id))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RdpLaunch {
+    file: String,
+    target: String,
+    /// Oturumun kayıtlı parolası var.
+    has_password: bool,
+    /// Parola istemciye verildi (Windows: Kimlik Bilgisi Yöneticisi); istemci sormayacak.
+    password_given: bool,
+}
+
 /// RDP: bilgisayardaki istemci için .rdp dosyası yazar. `via` verilirse önce SSH tüneli açılır.
+/// Kayıtlı parola Windows'ta `cmdkey` ile mstsc'ye verilir. macOS'taki Windows App ve Linux
+/// istemcileri .rdp dosyasından parola okumadığı için orada arayüz parolayı panoya kopyalar.
 #[tauri::command]
 async fn rdp_prepare(
     state: State<'_, AppState>,
@@ -455,7 +468,8 @@ async fn rdp_prepare(
     port: u16,
     username: String,
     via: Option<String>,
-) -> CmdResult<(String, String)> {
+    session_id: Option<String>,
+) -> CmdResult<RdpLaunch> {
     let (addr, tport) = match via {
         Some(v) => {
             let conn = state.conn(&v)?;
@@ -468,15 +482,48 @@ async fn rdp_prepare(
         None => (host.trim().to_string(), port),
     };
     let target = format!("{addr}:{tport}");
+    let username = username.trim();
+    let password = session_id.as_deref().and_then(store::get_secret).filter(|p| !p.is_empty());
+    let password_given = match &password {
+        Some(pw) if !username.is_empty() => give_rdp_password(&addr, username, pw),
+        _ => false,
+    };
     let dir = store::config_dir().join("rdp");
     std::fs::create_dir_all(&dir).map_err(err)?;
     let path = dir.join(format!("{}.rdp", uuid::Uuid::new_v4()));
-    let mut body = format!("full address:s:{target}\r\nprompt for credentials:i:1\r\nscreen mode id:i:1\r\n");
-    if !username.trim().is_empty() {
-        body += &format!("username:s:{}\r\n", username.trim());
+    let prompt = if password_given { 0 } else { 1 };
+    let mut body = format!("full address:s:{target}\r\nprompt for credentials:i:{prompt}\r\nscreen mode id:i:1\r\n");
+    if !username.is_empty() {
+        body += &format!("username:s:{username}\r\n");
     }
     std::fs::write(&path, body).map_err(err)?;
-    Ok((path.to_string_lossy().into_owned(), target))
+    Ok(RdpLaunch {
+        file: path.to_string_lossy().into_owned(),
+        target,
+        has_password: password.is_some(),
+        password_given,
+    })
+}
+
+/// mstsc, `TERMSRV/<adres>` kimlik bilgisini Kimlik Bilgisi Yöneticisi'nden kendisi alır.
+#[cfg(windows)]
+fn give_rdp_password(addr: &str, username: &str, password: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("cmdkey")
+        .arg(format!("/generic:TERMSRV/{addr}"))
+        .arg(format!("/user:{username}"))
+        .arg(format!("/pass:{password}"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(not(windows))]
+fn give_rdp_password(_addr: &str, _username: &str, _password: &str) -> bool {
+    false
 }
 
 /// Bağlı sunucunun kaynak durumu (alt çubuk). Kabuk kanalından bağımsız bir kanalda çalışır.

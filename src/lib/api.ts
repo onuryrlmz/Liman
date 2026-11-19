@@ -221,8 +221,14 @@ export const api = {
   streamWrite: (id: string, data: Uint8Array) => invoke<void>("stream_write", data, { headers: { "x-stream": id } }),
   streamClose: (id: string) => invoke<void>("stream_close", { id }),
   sessionPassword: (sessionId: string) => invoke<string | null>("session_password", { sessionId }),
-  rdpPrepare: (host: string, port: number, username: string, via: string | null) =>
-    invoke<[string, string]>("rdp_prepare", { host, port, username, via }),
+  rdpPrepare: (host: string, port: number, username: string, via: string | null, sessionId: string | null) =>
+    invoke<{ file: string; target: string; hasPassword: boolean; passwordGiven: boolean }>("rdp_prepare", {
+      host,
+      port,
+      username,
+      via,
+      sessionId,
+    }),
   sshStats: (id: string) => invoke<ServerStats>("ssh_stats", { id }),
   hostKeyAnswer: (id: string, accept: boolean) => invoke<void>("host_key_answer", { id, accept }),
   sudoAnswer: (id: string, password: string | null, remember: boolean) =>
