@@ -79,6 +79,9 @@ pub struct Session {
     /// Özel SFTP sunucu komutu, ör. "sudo /usr/lib/openssh/sftp-server".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sftp_command: Option<String>,
+    /// RDP: uzak makineye "Liman" sürücüsü olarak açılan yerel klasör.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rdp_share: Option<String>,
 }
 
 /// Oturumun kayıtlı sudo parolasının anahtarlıktaki adı.

@@ -325,6 +325,7 @@ fn session(name: &str, folder: Option<&str>, auth: store::AuthKind) -> store::Se
         tunnels: vec![],
         sftp_sudo: false,
         sftp_command: None,
+        rdp_share: None,
     }
 }
 
@@ -1564,4 +1565,83 @@ fn mremoteng_real_file() {
         folders.len(),
         max_depth
     );
+}
+
+/// Elle çalıştırılır: LIMAN_TEST_RDP=host:port:kullanıcı:parola cargo test --lib rdp_live -- --ignored --nocapture
+#[test]
+#[ignore]
+fn rdp_live() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_env("LIMAN_TEST_RDP_LOG"))
+        .try_init();
+    let spec = std::env::var("LIMAN_TEST_RDP").unwrap();
+    let mut it = spec.splitn(4, ':');
+    let (host, port, user, pw) = (it.next().unwrap(), it.next().unwrap().parse().unwrap(), it.next().unwrap(), it.next().unwrap());
+    let log: Arc<Mutex<(usize, usize, Vec<String>)>> = Default::default();
+    let l = log.clone();
+    // Gelen bölgelerden ekranı yeniden kur; LIMAN_TEST_RDP_SHOT verilirse PPM olarak yaz.
+    let fb: Arc<Mutex<(usize, usize, Vec<u8>)>> = Default::default();
+    let f = fb.clone();
+    let out: crate::rdp::Out = Arc::new(move |m: Vec<u8>| {
+        let mut g = l.lock().unwrap();
+        let u = |o: usize| usize::from(u16::from_le_bytes([m[o], m[o + 1]]));
+        match m[0] {
+            1 => {
+                g.0 += 1;
+                g.1 += m.len();
+                let mut fb = f.lock().unwrap();
+                let (x, y, w, h) = (u(1), u(3), u(5), u(7));
+                let fw = fb.0;
+                for row in 0..h {
+                    for col in 0..w {
+                        let src = 9 + (row * w + col) * 4;
+                        let dst = ((y + row) * fw + x + col) * 3;
+                        if dst + 3 <= fb.2.len() {
+                            fb.2[dst..dst + 3].copy_from_slice(&m[src..src + 3]);
+                        }
+                    }
+                }
+            }
+            6 => g.2.push(String::from_utf8_lossy(&m[1..]).into_owned()),
+            2 => {
+                g.2.push(format!("boyut {}x{}", u(1), u(3)));
+                *f.lock().unwrap() = (u(1), u(3), vec![0; u(1) * u(3) * 3]);
+            }
+            _ => {}
+        }
+    });
+    let h = crate::rdp::start(
+        crate::rdp::Params {
+            host: host.into(),
+            port,
+            server_name: host.into(),
+            username: user.into(),
+            password: pw.into(),
+            width: 1024,
+            height: 768,
+            scale: 100,
+            keyboard_layout: 0x041F,
+            share_dir: std::env::var("LIMAN_TEST_RDP_SHARE").ok(),
+        },
+        out,
+    );
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    h.send(crate::rdp::Input::Move { x: 500, y: 400 });
+    // Pano: LIMAN_TEST_RDP_CLIP=1 ise yerel panodaki metin uzak makineye duyurulur.
+    if std::env::var("LIMAN_TEST_RDP_CLIP").is_ok() {
+        h.send(crate::rdp::Input::ClipboardSync);
+        std::thread::sleep(std::time::Duration::from_secs(20));
+    }
+    h.send(crate::rdp::Input::Resize { width: 1280, height: 720, scale: 100 });
+    std::thread::sleep(std::time::Duration::from_secs(12));
+    h.send(crate::rdp::Input::Close);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let g = log.lock().unwrap();
+    println!("bölge={} bayt={} olaylar={:?}", g.0, g.1, g.2);
+    if let Ok(path) = std::env::var("LIMAN_TEST_RDP_SHOT") {
+        let fb = fb.lock().unwrap();
+        let mut ppm = format!("P6\n{} {}\n255\n", fb.0, fb.1).into_bytes();
+        ppm.extend_from_slice(&fb.2);
+        std::fs::write(path, ppm).unwrap();
+    }
 }

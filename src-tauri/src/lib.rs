@@ -4,6 +4,7 @@ mod dragout;
 mod importers;
 mod local;
 mod raw;
+mod rdp;
 mod localfs;
 mod logger;
 mod sftp;
@@ -40,6 +41,8 @@ struct AppState {
     sudo_questions: Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Option<ssh::SudoAnswer>>>>>,
     /// Bu çalışma boyunca kabul edilen sudo parolaları (oturum kimliğine göre).
     sudo_cache: Arc<Mutex<HashMap<String, String>>>,
+    /// Uygulama içi RDP oturumları.
+    rdps: Mutex<HashMap<String, rdp::RdpHandle>>,
 }
 
 impl AppState {
@@ -524,6 +527,80 @@ fn give_rdp_password(addr: &str, username: &str, password: &str) -> bool {
 #[cfg(not(windows))]
 fn give_rdp_password(_addr: &str, _username: &str, _password: &str) -> bool {
     false
+}
+
+/// Uygulama içi RDP: bağlanır, görüntü ve durum `on_data` kanalından gelir.
+/// Parola verilmezse oturumun kayıtlı parolası kullanılır.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn rdp_connect(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    username: String,
+    password: Option<String>,
+    session_id: Option<String>,
+    via: Option<String>,
+    width: u16,
+    height: u16,
+    scale: u32,
+    keyboard_layout: Option<u32>,
+    share_dir: Option<String>,
+    on_data: Channel<InvokeResponseBody>,
+) -> CmdResult<String> {
+    let host = host.trim().to_string();
+    let (addr, tport) = match via {
+        Some(v) => {
+            let conn = state.conn(&v)?;
+            let t = conn
+                .start_tunnel(ssh::TunnelKind::Local, String::new(), 0, host.clone(), port)
+                .await
+                .map_err(err)?;
+            ("127.0.0.1".to_string(), t.listen_port)
+        }
+        None => (host.clone(), port),
+    };
+    let password = password
+        .filter(|p| !p.is_empty())
+        .or_else(|| session_id.as_deref().and_then(store::get_secret))
+        .unwrap_or_default();
+    let out: rdp::Out = Arc::new(move |d| {
+        let _ = on_data.send(InvokeResponseBody::Raw(d));
+    });
+    let id = uuid::Uuid::new_v4().to_string();
+    let handle = rdp::start(
+        rdp::Params {
+            host: addr,
+            port: tport,
+            server_name: host,
+            username: username.trim().to_string(),
+            password,
+            width: width.clamp(200, 8192),
+            height: height.clamp(200, 8192),
+            scale: scale.clamp(100, 500),
+            keyboard_layout: keyboard_layout.unwrap_or(0x0409),
+            share_dir: share_dir.filter(|d| std::path::Path::new(d).is_dir()),
+        },
+        out,
+    );
+    state.rdps.lock().unwrap().insert(id.clone(), handle);
+    Ok(id)
+}
+
+#[tauri::command]
+fn rdp_input(state: State<'_, AppState>, id: String, events: Vec<rdp::Input>) {
+    if let Some(h) = state.rdps.lock().unwrap().get(&id) {
+        for e in events {
+            h.send(e);
+        }
+    }
+}
+
+#[tauri::command]
+fn rdp_close(state: State<'_, AppState>, id: String) {
+    if let Some(h) = state.rdps.lock().unwrap().remove(&id) {
+        h.send(rdp::Input::Close);
+    }
 }
 
 /// Bağlı sunucunun kaynak durumu (alt çubuk). Kabuk kanalından bağımsız bir kanalda çalışır.
@@ -1075,6 +1152,9 @@ pub fn run() {
             stream_close,
             session_password,
             rdp_prepare,
+            rdp_connect,
+            rdp_input,
+            rdp_close,
             term_write,
             term_resize,
             term_close,

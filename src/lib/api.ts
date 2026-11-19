@@ -28,6 +28,8 @@ export interface Session {
   sftpSudo?: boolean;
   /** Özel SFTP sunucu komutu, ör. "sudo /usr/lib/openssh/sftp-server". */
   sftpCommand?: string | null;
+  /** RDP: uzak makineye "Liman" sürücüsü olarak açılan yerel klasör. */
+  rdpShare?: string | null;
 }
 
 export interface ConnectRequest {
@@ -97,6 +99,17 @@ export interface HostKeyQuestion {
 }
 
 export type ImportSource = "ssh-config" | "mobaxterm" | "mremoteng";
+
+/** Uygulama içi RDP'ye giden giriş olayları (src-tauri/src/rdp.rs `Input`). */
+export type RdpInput =
+  | { t: "move"; x: number; y: number }
+  | { t: "button"; b: number; down: boolean }
+  | { t: "wheel"; delta: number; vertical: boolean }
+  | { t: "key"; code: number; down: boolean }
+  | { t: "unicode"; ch: string; down: boolean }
+  | { t: "releaseAll" }
+  | { t: "clipboardSync" }
+  | { t: "resize"; width: number; height: number; scale: number };
 
 export interface ImportPreview {
   sessions: Session[];
@@ -221,6 +234,22 @@ export const api = {
   streamWrite: (id: string, data: Uint8Array) => invoke<void>("stream_write", data, { headers: { "x-stream": id } }),
   streamClose: (id: string) => invoke<void>("stream_close", { id }),
   sessionPassword: (sessionId: string) => invoke<string | null>("session_password", { sessionId }),
+  rdpConnect: (o: {
+    host: string;
+    port: number;
+    username: string;
+    password: string | null;
+    sessionId: string | null;
+    via: string | null;
+    width: number;
+    height: number;
+    scale: number;
+    keyboardLayout: number;
+    shareDir: string | null;
+    onData: (d: Uint8Array) => void;
+  }) => invoke<string>("rdp_connect", { ...o, onData: dataChannel(o.onData) }),
+  rdpInput: (id: string, events: RdpInput[]) => invoke<void>("rdp_input", { id, events }),
+  rdpClose: (id: string) => invoke<void>("rdp_close", { id }),
   rdpPrepare: (host: string, port: number, username: string, via: string | null, sessionId: string | null) =>
     invoke<{ file: string; target: string; hasPassword: boolean; passwordGiven: boolean }>("rdp_prepare", {
       host,

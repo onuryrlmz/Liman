@@ -46,6 +46,7 @@ fn new_session(name: &str, host: &str) -> Session {
         tunnels: vec![],
         sftp_sudo: false,
         sftp_command: None,
+        rdp_share: None,
     }
 }
 

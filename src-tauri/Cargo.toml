@@ -1,6 +1,6 @@
 [package]
 name = "liman"
-version = "0.8.1"
+version = "0.9.0"
 description = "SSH, SFTP ve yerel terminal istemcisi"
 authors = ["onuryrlmz"]
 edition = "2021"
@@ -36,10 +36,29 @@ tauri-plugin-clipboard-manager = "2.4.0"
 argon2 = "0.6.0"
 chacha20poly1305 = "0.11.0"
 # mRemoteNG dosyalarındaki parolalar: AES-256-GCM + PBKDF2-HMAC-SHA1.
-aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
+aes-gcm = { version = ">=0.11.0-rc.4, <0.12", default-features = false, features = ["aes", "alloc"] }
 pbkdf2 = { version = "0.13.0", default-features = false, features = ["hmac"] }
 sha1 = { version = "0.11.0", default-features = false }
 quick-xml = "0.42.0"
+# Uygulama içi RDP istemcisi.
+ironrdp-connector = "0.12.0"
+ironrdp-session = "0.13.0"
+ironrdp-graphics = "0.11.0"
+ironrdp-input = "0.9.0"
+ironrdp-pdu = "0.11.0"
+ironrdp-core = "0.3.1"
+ironrdp-dvc = "0.10.0"
+ironrdp-svc = "0.10.0"
+ironrdp-displaycontrol = "0.10.0"
+ironrdp-cliprdr = "0.9.0"
+ironrdp-rdpsnd = "0.11.0"
+ironrdp-rdpdr = "0.9.0"
+ironrdp-rdpdr-native = "0.9.0"
+ironrdp-rdpsnd-native = { version = "0.8.0", default-features = false }
+ironrdp-tokio = "0.12.0"
+ironrdp-tls = { version = "0.3.0", features = ["rustls"] }
+smallvec = "1"
+rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs"] }
 getrandom = "0.4.3"
 tauri-plugin-updater = "2.13.0"
 tauri-plugin-process = "2.4.0"
@@ -73,3 +92,6 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

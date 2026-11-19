@@ -29,6 +29,15 @@ pub fn set_files(paths: Vec<String>) -> Result<()> {
     with(|c| c.set_files(paths))
 }
 
+/// Panodaki metin; metin yoksa `None`.
+pub fn get_text() -> Option<String> {
+    with(|c| Ok(c.get_text().ok())).ok().flatten().filter(|t| !t.is_empty())
+}
+
+pub fn set_text(text: String) -> Result<()> {
+    with(|c| c.set_text(text))
+}
+
 /// Panodaki dosyaların yerel yolları; dosya yoksa boş liste.
 pub fn get_files() -> Result<Vec<String>> {
     let list = with(|c| Ok(c.get_files().unwrap_or_default()))?;

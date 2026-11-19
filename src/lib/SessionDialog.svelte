@@ -66,6 +66,11 @@
     if (typeof p === "string") form.keyPath = p;
   }
 
+  async function pickShare() {
+    const p = await open({ title: "Uzak masaüstüne paylaşılacak klasör", multiple: false, directory: true });
+    if (typeof p === "string") form.rdpShare = p;
+  }
+
   async function save(connect: boolean) {
     error = "";
     if (!form.host.trim()) {
@@ -89,6 +94,7 @@
           sftpSudo: isSsh ? !!form.sftpSudo : false,
           sftpCommand: isSsh ? form.sftpCommand?.trim() || null : null,
           baud: form.kind === "serial" ? Number(form.baud) || 115200 : null,
+          rdpShare: form.kind === "rdp" ? form.rdpShare?.trim() || null : null,
         },
         forget ? "" : secret ? secret : null,
       );
@@ -240,6 +246,16 @@
         {#if session?.hasSecret}
           <label class="check full"><input type="checkbox" bind:checked={forget} /> Kayıtlı parolayı sil</label>
         {/if}
+      {/if}
+      {#if form.kind === "rdp"}
+        <label class="full">
+          <span>Paylaşılan klasör</span>
+          <div class="row">
+            <input bind:value={form.rdpShare} placeholder="isteğe bağlı" spellcheck="false" />
+            <button type="button" class="btn" onclick={pickShare}>Seç…</button>
+          </div>
+          <small>Uzak makinede "Liman" adlı sürücü olarak görünür; boş bırakılırsa hiçbir klasör paylaşılmaz.</small>
+        </label>
       {/if}
     {/if}
     <label>
